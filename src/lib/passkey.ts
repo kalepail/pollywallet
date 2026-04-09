@@ -277,6 +277,26 @@ export function toI128(stroops: bigint): xdr.ScVal {
   );
 }
 
+// --- Amount Parsing ---
+
+/**
+ * Parse a decimal XLM string to stroops (bigint) using string manipulation.
+ * Avoids IEEE 754 precision loss from float multiplication.
+ * Accepts up to 7 decimal places (1 stroop = 0.0000001 XLM).
+ */
+export function parseXlmToStroops(xlmString: string): bigint {
+  const trimmed = xlmString.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+    throw new Error(`Invalid XLM amount: "${xlmString}"`);
+  }
+  const [whole, frac = ""] = trimmed.split(".");
+  if (frac.length > 7) {
+    throw new Error("XLM amount exceeds stroop precision (max 7 decimal places)");
+  }
+  const paddedFrac = frac.padEnd(7, "0");
+  return BigInt(whole + paddedFrac);
+}
+
 // --- LocalStorage ---
 const STORAGE_KEY = "pollywallet:wallet";
 
