@@ -32,16 +32,15 @@ export const FRIENDBOT_URL = "https://friendbot.stellar.org";
 export const LEDGERS_PER_HOUR = 720;
 export const STROOPS_PER_XLM = 10_000_000;
 
-// Deterministic deployer keypair — same address for all users.
+// Deterministic deployer — same address for all users.
 // Contract ID uniqueness comes from the salt (hash of credential ID), not the deployer.
-// This account only needs to exist on-chain once (funded by friendbot on first use).
+// Only the public key is exported; signing happens server-side in relayer.ts.
 //
-// TODO(mainnet): This key is derivable from source and bundled client-side.
-// For production, move contract deployment to a server-side function so the
-// deployer private key never reaches the browser.
-export const DEPLOYER_KEYPAIR = Keypair.fromRawEd25519Seed(
+// TODO(mainnet): Replace the deterministic seed with a proper secret loaded
+// from environment variables so the deployer key isn't derivable from source.
+export const DEPLOYER_PUBLIC_KEY = Keypair.fromRawEd25519Seed(
   hash(Buffer.from("pollywallet")) as Buffer
-);
+).publicKey();
 
 // --- Types ---
 export interface StoredWallet {

@@ -13,7 +13,7 @@ import {
   scValToNative,
 } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
-import { submitToRelayer } from "../lib/relayer";
+import { submitToRelayer, signAndSubmitDeploy } from "../lib/relayer";
 import {
   createPasskey,
   signWithPasskey,
@@ -35,7 +35,7 @@ import {
   TESTNET_WEBAUTHN_VERIFIER,
   TESTNET_NATIVE_TOKEN_CONTRACT,
   FRIENDBOT_URL,
-  DEPLOYER_KEYPAIR,
+  DEPLOYER_PUBLIC_KEY,
   LEDGERS_PER_HOUR,
   STROOPS_PER_XLM,
 } from "../lib/passkey";
@@ -102,11 +102,11 @@ export function useWallet() {
       const credIdBuf = base64url.toBuffer(credentialId);
       const saltHash = hash(credIdBuf);
       const finalContractId = deriveContractAddress(
-        credIdBuf, DEPLOYER_KEYPAIR.publicKey(), TESTNET_NETWORK_PASSPHRASE
+        credIdBuf, DEPLOYER_PUBLIC_KEY, TESTNET_NETWORK_PASSPHRASE
       );
 
       const deployFunc = Operation.createCustomContract({
-        address: Address.fromString(DEPLOYER_KEYPAIR.publicKey()),
+        address: Address.fromString(DEPLOYER_PUBLIC_KEY),
         wasmHash: Buffer.from(TESTNET_ACCOUNT_WASM_HASH, "hex"),
         salt: saltHash,
         constructorArgs: [
@@ -117,11 +117,9 @@ export function useWallet() {
 
       setStatus("Preparing deploy...");
 
-      // Ensure deployer exists (idempotent — friendbot is a no-op if already funded)
-      await fetch(`${FRIENDBOT_URL}?addr=${DEPLOYER_KEYPAIR.publicKey()}`).catch(() => {});
-
-      const sourceAccount = await server.getAccount(DEPLOYER_KEYPAIR.publicKey());
-      const simTx = new TransactionBuilder(sourceAccount, {
+      // Build unsigned transaction — signing happens server-side
+      const sourceAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
+      const unsignedTx = new TransactionBuilder(sourceAccount, {
         fee: "100",
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
       })
@@ -129,17 +127,8 @@ export function useWallet() {
         .setTimeout(30)
         .build();
 
-      setStatus("Simulating deploy...");
-      const simResult = await server.simulateTransaction(simTx);
-      if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
-
-      const preparedTx = rpc
-        .assembleTransaction(simTx, simResult as rpc.Api.SimulateTransactionSuccessResponse)
-        .build();
-      preparedTx.sign(DEPLOYER_KEYPAIR);
-
       setStatus("Deploying via relayer...");
-      const deployResult = await submitToRelayer({ data: { xdr: preparedTx.toXDR() } });
+      const deployResult = await signAndSubmitDeploy({ data: { unsignedXdr: unsignedTx.toXDR() } });
       if (!deployResult.success) throw new Error(deployResult.error || "Deploy failed");
 
       if (deployResult.hash) {
