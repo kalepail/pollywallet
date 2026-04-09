@@ -78,6 +78,7 @@ export function useWallet() {
     }
   }, []);
 
+  // TODO: Add periodic polling or subscription so balance updates on external receives.
   useEffect(() => {
     if (wallet) fetchBalance(wallet.contractId);
   }, [wallet, fetchBalance]);

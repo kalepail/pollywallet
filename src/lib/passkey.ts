@@ -4,6 +4,7 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
 } from "@simplewebauthn/browser";
 import { Buffer } from "buffer";
+// Buffer polyfill for browser — redundant on server (nodejs_compat) but harmless.
 if (typeof globalThis !== "undefined" && !(globalThis as any).Buffer) {
   (globalThis as any).Buffer = Buffer;
 }
@@ -34,6 +35,10 @@ export const STROOPS_PER_XLM = 10_000_000;
 // Deterministic deployer keypair — same address for all users.
 // Contract ID uniqueness comes from the salt (hash of credential ID), not the deployer.
 // This account only needs to exist on-chain once (funded by friendbot on first use).
+//
+// TODO(mainnet): This key is derivable from source and bundled client-side.
+// For production, move contract deployment to a server-side function so the
+// deployer private key never reaches the browser.
 export const DEPLOYER_KEYPAIR = Keypair.fromRawEd25519Seed(
   hash(Buffer.from("pollywallet")) as Buffer
 );
