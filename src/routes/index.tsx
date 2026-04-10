@@ -7,7 +7,8 @@ export const Route = createFileRoute("/")({ component: App });
 function App() {
   const {
     wallet, balance, status, loading, copied, destination, amount,
-    setDestination, setAmount,
+    contextRules, selectedRuleId, rulesLoading,
+    setDestination, setAmount, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
   } = useWallet();
 
@@ -65,6 +66,45 @@ function App() {
             Send XLM
           </h2>
           <div className="space-y-3">
+            {/* Context Rule Selector */}
+            {contextRules.length > 0 && (
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Signing Rule</label>
+                <select
+                  value={selectedRuleId}
+                  onChange={(e) => setSelectedRuleId(Number(e.target.value))}
+                  className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white focus:outline-none focus:border-cyan-500 transition-colors"
+                >
+                  {contextRules.map((rule) => (
+                    <option key={rule.id} value={rule.id}>
+                      {rule.name}
+                      {rule.policies.length > 0 ? ` (${rule.policies.length} policy)` : ""}
+                      {rule.contextType === "Default" ? " — passkey" : ""}
+                      {rule.signers.some(s => s.type === "Delegated") ? " — ephemeral key" : ""}
+                    </option>
+                  ))}
+                </select>
+                {(() => {
+                  const rule = contextRules.find(r => r.id === selectedRuleId);
+                  if (rule && rule.policies.length > 0) {
+                    return (
+                      <div className="mt-2 bg-violet-500/10 border border-violet-500/30 rounded-lg px-3 py-2">
+                        <p className="text-xs text-violet-400">
+                          Policy-enforced: {rule.policies.length} policy active
+                          {rule.signers.some(s => s.type === "Delegated")
+                            ? " — signs with ephemeral key (no passkey needed)"
+                            : ""}
+                        </p>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+            )}
+            {rulesLoading && (
+              <p className="text-xs text-gray-500">Loading signing rules...</p>
+            )}
             <input type="text" placeholder="Destination (G... or C...)" value={destination}
               onChange={(e) => setDestination(e.target.value)}
               className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />

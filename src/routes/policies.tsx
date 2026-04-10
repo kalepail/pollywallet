@@ -607,6 +607,11 @@ function PolicyBuilder() {
         } catch { /* best effort */ }
       }
 
+      // Save ephemeral signer secret so the home page can sign transfers with it
+      const ephemeralSigners = JSON.parse(localStorage.getItem("pollywallet:ephemeral-signers") || "{}");
+      ephemeralSigners[ephemeralPublicKey] = ephemeralKeypair.secret();
+      localStorage.setItem("pollywallet:ephemeral-signers", JSON.stringify(ephemeralSigners));
+
       setInstallResult({
         contextRuleId,
         ephemeralPublicKey,

@@ -40,12 +40,28 @@ import {
   STROOPS_PER_XLM,
 } from "../lib/passkey";
 import type { StoredWallet } from "../lib/passkey";
+import { requestContextRules, type ContextRuleInfo } from "../lib/context-rules";
 
 const BASE_FEE = "1000000";
 const server = new rpc.Server(TESTNET_RPC_URL);
 
 /** Friendbot gives 10,000 XLM. Reserve 5 XLM in the temp account for the transfer fee + base reserve. */
 const FRIENDBOT_TRANSFER_XLM = 9_995n;
+
+/** Key for persisting ephemeral signer secrets in localStorage. */
+const EPHEMERAL_SIGNERS_KEY = "pollywallet:ephemeral-signers";
+
+function loadEphemeralSigners(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(EPHEMERAL_SIGNERS_KEY) || "{}");
+  } catch { return {}; }
+}
+
+function saveEphemeralSigner(publicKey: string, secret: string) {
+  const signers = loadEphemeralSigners();
+  signers[publicKey] = secret;
+  localStorage.setItem(EPHEMERAL_SIGNERS_KEY, JSON.stringify(signers));
+}
 
 export function useWallet() {
   const [wallet, setWallet] = useState<StoredWallet | null>(null);
@@ -55,11 +71,30 @@ export function useWallet() {
   const [copied, setCopied] = useState(false);
   const [destination, setDestination] = useState("");
   const [amount, setAmount] = useState("");
+  const [contextRules, setContextRules] = useState<ContextRuleInfo[]>([]);
+  const [selectedRuleId, setSelectedRuleId] = useState<number>(0);
+  const [rulesLoading, setRulesLoading] = useState(false);
 
   useEffect(() => {
     const stored = loadWallet();
     if (stored) setWallet(stored);
   }, []);
+
+  // Fetch context rules when wallet is available
+  const fetchRules = useCallback(async (contractId: string) => {
+    setRulesLoading(true);
+    try {
+      const result = await requestContextRules(contractId);
+      if (result.success) {
+        setContextRules(result.rules);
+      }
+    } catch { /* best effort */ }
+    finally { setRulesLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (wallet) fetchRules(wallet.contractId);
+  }, [wallet, fetchRules]);
 
   const fetchBalance = useCallback(async (contractId: string) => {
     try {
@@ -263,7 +298,21 @@ export function useWallet() {
       const authEntries = simSuccess.result?.auth ?? [];
       const expiration = simSuccess.latestLedger + LEDGERS_PER_HOUR;
 
-      setStatus("Sign with your passkey...");
+      // Sign auth entries — method depends on which context rule is selected
+      const selectedRule = contextRules.find(r => r.id === selectedRuleId);
+      const usingDelegatedSigner = selectedRule && selectedRule.signers.some(s => s.type === "Delegated");
+      const delegatedSignerAddr = selectedRule?.signers.find(s => s.type === "Delegated")?.address;
+      const ephemeralSecret = delegatedSignerAddr ? loadEphemeralSigners()[delegatedSignerAddr] : null;
+
+      if (usingDelegatedSigner && !ephemeralSecret) {
+        throw new Error(`No stored secret for Delegated signer ${delegatedSignerAddr}. The ephemeral key from policy install may have been lost.`);
+      }
+
+      if (usingDelegatedSigner && ephemeralSecret) {
+        setStatus("Signing with ephemeral key...");
+      } else {
+        setStatus("Sign with your passkey...");
+      }
 
       const signedAuthEntries: xdr.SorobanAuthorizationEntry[] = [];
       for (const entry of authEntries) {
@@ -274,12 +323,44 @@ export function useWallet() {
           credentials.signatureExpirationLedger(expiration);
 
           if (Address.fromScAddress(credentials.address()).toString() === wallet.contractId) {
-            const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, entry, expiration);
-            const authDigest = buildAuthDigest(sigPayload, [0]);
-            const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
-            credentials.signature(
-              writeAuthPayload([0], signer, buildWebAuthnSigBytes(webAuthnResult))
-            );
+            if (usingDelegatedSigner && ephemeralSecret) {
+              // Policy-enforced rule: sign with ephemeral Delegated keypair
+              const ephemeralKeypair = Keypair.fromSecret(ephemeralSecret);
+              const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, entry, expiration);
+              const authDigest = buildAuthDigest(sigPayload, [selectedRuleId]);
+
+              // Build Delegated signer ScVal
+              const delegatedSignerScVal = xdr.ScVal.scvVec([
+                xdr.ScVal.scvSymbol("Delegated"),
+                xdr.ScVal.scvAddress(Address.fromString(ephemeralKeypair.publicKey()).toScAddress()),
+              ]);
+
+              const signature = ephemeralKeypair.sign(authDigest);
+
+              credentials.signature(xdr.ScVal.scvMap([
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("context_rule_ids"),
+                  val: xdr.ScVal.scvVec([xdr.ScVal.scvU32(selectedRuleId)]),
+                }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("signers"),
+                  val: xdr.ScVal.scvMap([
+                    new xdr.ScMapEntry({
+                      key: delegatedSignerScVal,
+                      val: xdr.ScVal.scvBytes(signature),
+                    }),
+                  ]),
+                }),
+              ]));
+            } else {
+              // Default rule: sign with passkey
+              const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, entry, expiration);
+              const authDigest = buildAuthDigest(sigPayload, [selectedRuleId]);
+              const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
+              credentials.signature(
+                writeAuthPayload([selectedRuleId], signer, buildWebAuthnSigBytes(webAuthnResult))
+              );
+            }
           }
           signedAuthEntries.push(entry);
         } else {
@@ -329,8 +410,10 @@ export function useWallet() {
 
   return {
     wallet, balance, status, loading, copied, destination, amount,
-    setDestination, setAmount,
+    contextRules, selectedRuleId, rulesLoading,
+    setDestination, setAmount, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
+    fetchRules, saveEphemeralSigner,
   };
 }
 
