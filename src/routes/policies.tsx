@@ -517,15 +517,6 @@ function PolicyBuilder() {
       ephemeralSigners[ephemeralPublicKey] = ephemeralKeypair.secret();
       localStorage.setItem("pollywallet:ephemeral-signers", JSON.stringify(ephemeralSigners));
 
-      // Fund the ephemeral signer via Friendbot — Delegated signers need
-      // to exist as Stellar accounts for require_auth_for_args to work
-      setInstallStatus("Funding ephemeral signer...");
-      try {
-        await fetch(`https://friendbot.stellar.org?addr=${ephemeralPublicKey}`);
-      } catch {
-        // Non-fatal — the account may already exist or Friendbot may be down
-      }
-
       // Determine the target contract from the schema
       const targetContract = schema.contracts[0]?.address;
       if (!targetContract) throw new Error("No target contract in schema");

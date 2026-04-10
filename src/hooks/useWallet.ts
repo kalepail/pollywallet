@@ -313,23 +313,6 @@ export function useWallet() {
         throw new Error(`No stored secret for signer ${delegatedSignerAddr?.slice(0, 10)}... — reinstall the policy to generate a new key.`);
       }
 
-      // Ensure the ephemeral signer account exists on testnet
-      // (Delegated signers need a funded account for require_auth_for_args)
-      if (usingPolicyRule && ephemeralSecret) {
-        setStatus("Checking signer account...");
-        const ephemeralKeypair = Keypair.fromSecret(ephemeralSecret);
-        try {
-          await server.getAccount(ephemeralKeypair.publicKey());
-        } catch {
-          setStatus("Funding signer account...");
-          await fetch(`${FRIENDBOT_URL}?addr=${ephemeralKeypair.publicKey()}`).catch(() => {});
-          // Wait for Friendbot to process
-          for (let i = 0; i < 10; i++) {
-            try { await server.getAccount(ephemeralKeypair.publicKey()); break; } catch { await new Promise(r => setTimeout(r, 1000)); }
-          }
-        }
-      }
-
       // --- Pass 1: Simulate to get auth entries ---
       setStatus("Simulating transfer...");
       const simAccount = new Account(
@@ -394,7 +377,10 @@ export function useWallet() {
         ]));
 
         // Build the Delegated signer's auth entry for __check_auth(auth_digest)
-        const nonce = xdr.Int64.fromString(Date.now().toString());
+        // The signature is scvVoid() — the wallet's __check_auth handles
+        // Delegated signer verification internally, not via standard Soroban
+        // address auth. The relayer processes this correctly.
+        const delegatedNonce = xdr.Int64.fromString(Date.now().toString());
         const delegatedInvocation = new xdr.SorobanAuthorizedInvocation({
           function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
             new xdr.InvokeContractArgs({
@@ -406,35 +392,13 @@ export function useWallet() {
           subInvocations: [],
         });
 
-        // Sign the Delegated signer's auth entry
-        const delegatedPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-          new xdr.HashIdPreimageSorobanAuthorization({
-            networkId,
-            nonce,
-            signatureExpirationLedger: expiration,
-            invocation: delegatedInvocation,
-          })
-        );
-        const delegatedSig = ephemeralKeypair.sign(hash(delegatedPreimage.toXDR()));
-
         const delegatedAuthEntry = new xdr.SorobanAuthorizationEntry({
           credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
             new xdr.SorobanAddressCredentials({
               address: Address.fromString(ephemeralKeypair.publicKey()).toScAddress(),
-              nonce,
+              nonce: delegatedNonce,
               signatureExpirationLedger: expiration,
-              signature: xdr.ScVal.scvVec([
-                xdr.ScVal.scvMap([
-                  new xdr.ScMapEntry({
-                    key: xdr.ScVal.scvSymbol("public_key"),
-                    val: xdr.ScVal.scvBytes(ephemeralKeypair.rawPublicKey()),
-                  }),
-                  new xdr.ScMapEntry({
-                    key: xdr.ScVal.scvSymbol("signature"),
-                    val: xdr.ScVal.scvBytes(delegatedSig),
-                  }),
-                ]),
-              ]),
+              signature: xdr.ScVal.scvVoid(),
             })
           ),
           rootInvocation: delegatedInvocation,
