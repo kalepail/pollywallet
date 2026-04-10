@@ -952,10 +952,11 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
 /**
  * Server function that sends the original code + compile errors back to Kimi
  * to fix compilation issues. Uses the full system prompt for context.
+ * Streams progress chunks so the UI can show tokens/s during fix.
  */
 export const fixPolicyCode = createServerFn({ method: "POST" })
   .inputValidator(validateFixInput)
-  .handler(async ({ data }) => {
+  .handler(async function* ({ data }): AsyncGenerator<GenerateChunk> {
     const { rustCode, compileErrors } = data;
 
     const systemPrompt = buildSystemPrompt();
@@ -963,11 +964,15 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
 
     const ai = env.AI;
     if (!ai) {
-      return { success: false as const, error: "Workers AI binding not available.", code: null };
+      yield { type: "error", text: "Workers AI binding not available." };
+      return;
     }
 
+    let tokenCount = 0;
+    let codeBuffer = "";
+
     try {
-      const stream = (await ai.run("@cf/moonshotai/kimi-k2.5", {
+      const aiStream = (await ai.run("@cf/moonshotai/kimi-k2.5", {
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: fixPrompt },
@@ -978,16 +983,51 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
         chat_template_kwargs: { enable_thinking: false },
       })) as ReadableStream;
 
-      const code = await collectStreamedResponse(stream);
+      const reader = aiStream.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
 
-      if (!code) {
-        return { success: false as const, error: "AI returned empty response", code: null };
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split("\n");
+        sseBuffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
+          try {
+            const json = JSON.parse(trimmed.slice(6));
+            const token = extractTokenFromChunk(json);
+            if (token) {
+              tokenCount++;
+              codeBuffer += token;
+              yield { type: "token", text: token, tokenCount };
+            }
+          } catch {
+            // Skip malformed chunks
+          }
+        }
       }
 
-      const cleanCode = stripMarkdownFences(unescapeCodeContent(code));
-      return { success: true as const, error: null, code: cleanCode };
+      // Flush remaining buffer
+      if (sseBuffer.trim().startsWith("data: ") && sseBuffer.trim() !== "data: [DONE]") {
+        try {
+          const json = JSON.parse(sseBuffer.trim().slice(6));
+          const token = extractTokenFromChunk(json);
+          if (token) {
+            tokenCount++;
+            codeBuffer += token;
+          }
+        } catch {}
+      }
+
+      const cleanCode = stripMarkdownFences(unescapeCodeContent(codeBuffer));
+      yield { type: "done", text: cleanCode, tokenCount };
     } catch (err: any) {
-      return { success: false as const, error: err.message || "Fix failed", code: null };
+      yield { type: "error", text: err.message || "Fix stream error" };
     }
   });
 
@@ -1039,11 +1079,13 @@ export async function requestStreamingGeneration(
 
 /**
  * Client-side wrapper that sends code + compile errors to Kimi for a fix.
- * Strips noisy "Compiling..." lines before sending.
+ * Streams the fix response and calls onProgress with token stats.
+ * Returns the final fixed code.
  */
 export async function requestFixCode(
   rustCode: string,
   compileErrors: string,
+  onProgress?: (stats: { tokenCount: number; tokensPerSecond: number }) => void,
 ): Promise<{ success: boolean; error: string | null; code: string | null }> {
   // Strip dependency compilation noise — only send actual errors/warnings
   const cleanErrors = compileErrors
@@ -1059,9 +1101,31 @@ export async function requestFixCode(
     .join("\n")
     .trim();
 
-  return fixPolicyCode({
+  const generator = await fixPolicyCode({
     data: { rustCode, compileErrors: cleanErrors || compileErrors },
   });
+
+  const startTime = Date.now();
+  let finalCode: string | null = null;
+  let error: string | null = null;
+
+  for await (const chunk of generator) {
+    if (chunk.type === "token" && chunk.tokenCount && onProgress) {
+      const elapsed = (Date.now() - startTime) / 1000;
+      onProgress({
+        tokenCount: chunk.tokenCount,
+        tokensPerSecond: elapsed > 0 ? chunk.tokenCount / elapsed : 0,
+      });
+    } else if (chunk.type === "done") {
+      finalCode = chunk.text ?? null;
+    } else if (chunk.type === "error") {
+      error = chunk.text ?? "Fix failed";
+    }
+  }
+
+  if (error) return { success: false, error, code: null };
+  if (!finalCode) return { success: false, error: "AI returned empty response", code: null };
+  return { success: true, error: null, code: finalCode };
 }
 
 // --- Helpers ---

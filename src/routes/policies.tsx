@@ -416,7 +416,9 @@ function PolicyBuilder() {
         // Try auto-fix if we have attempts left
         if (attempt < MAX_FIX_ATTEMPTS) {
           setError(`Compilation failed — auto-fixing with AI (attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS})...`);
-          const fixResult = await requestFixCode(codeToTest, testResult.compileOutput);
+          const fixResult = await requestFixCode(codeToTest, testResult.compileOutput, (stats) => {
+            setError(`Auto-fixing (attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS}) — ${stats.tokenCount} tokens, ${stats.tokensPerSecond.toFixed(0)} tok/s`);
+          });
           if (fixResult.success && fixResult.code) {
             timeline[timeline.length - 1].fixed = true;
             setBuildTimeline([...timeline]);
