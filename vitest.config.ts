@@ -10,6 +10,7 @@ export default defineConfig({
   resolve: {
     alias: {
       buffer: fileURLToPath(new URL('./node_modules/buffer/index.js', import.meta.url)),
+      'cloudflare:workers': fileURLToPath(new URL('./src/lib/__tests__/__mocks__/cloudflare-workers.ts', import.meta.url)),
     },
     preserveSymlinks: false,
     dedupe: ['@stellar/stellar-sdk', '@stellar/stellar-base'],
