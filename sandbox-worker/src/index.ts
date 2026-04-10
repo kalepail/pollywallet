@@ -20,6 +20,9 @@ interface TestRequest {
 const SANDBOX_ID = "policy-compiler";
 const PROJECT_DIR = "/workspace/policy-contract";
 
+/** Track whether we've fetched dependencies in this container lifetime. */
+let depsFetched = false;
+
 async function setupProject(
   sandbox: ReturnType<typeof getSandbox>,
   cargoToml: string,
@@ -28,6 +31,21 @@ async function setupProject(
   await sandbox.exec(`mkdir -p ${PROJECT_DIR}/src`);
   await sandbox.writeFile(`${PROJECT_DIR}/Cargo.toml`, cargoToml);
   await sandbox.writeFile(`${PROJECT_DIR}/src/lib.rs`, libRs);
+
+  // Fetch dependencies separately on first run. This can take 60-120s
+  // on a cold container (downloading ~180 crates). Subsequent runs hit
+  // the local cargo cache and are instant.
+  if (!depsFetched) {
+    const fetchResult = await sandbox.exec("cargo fetch 2>&1", {
+      cwd: PROJECT_DIR,
+      timeout: 300_000, // 5 minutes for cold dependency download
+    });
+    if (fetchResult.success) {
+      depsFetched = true;
+    }
+    // Even if fetch fails (network issue), try building anyway —
+    // the prefetched crates from the Docker image may be enough.
+  }
 }
 
 async function handleCompile(
@@ -49,12 +67,12 @@ async function handleCompile(
   try {
     await setupProject(sandbox, cargoToml, libRs);
 
-    // Build the contract using stellar-cli
+    // Build the contract using stellar-cli (deps already fetched in setupProject)
     const buildResult = await sandbox.exec(
       "stellar contract build --out-dir target",
       {
         cwd: PROJECT_DIR,
-        timeout: 120_000,
+        timeout: 180_000,
       }
     );
 
@@ -138,10 +156,10 @@ async function handleTest(
 
     await setupProject(sandbox, cargoToml, fullLibRs);
 
-    // Run cargo test
+    // Run cargo test (deps already fetched in setupProject)
     const testResult = await sandbox.exec("cargo test 2>&1", {
       cwd: PROJECT_DIR,
-      timeout: 180_000,
+      timeout: 240_000,
     });
 
     const output = testResult.stdout + testResult.stderr;
