@@ -306,7 +306,6 @@ export function useWallet() {
         );
       }
 
-      const usingPolicyRule = selectedRule && selectedRule.policies.length > 0;
       const delegatedSignerAddr = selectedRule?.signers.find(s => s.type === "Delegated")?.address;
       const ephemeralSecret = delegatedSignerAddr ? loadEphemeralSigners()[delegatedSignerAddr] : null;
 
