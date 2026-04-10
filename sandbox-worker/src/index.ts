@@ -324,13 +324,12 @@ async function handleDeploy(
     }
 
     // Step 2: Deploy the contract from the installed WASM hash
-    // Retry up to 3 times with a short delay to handle propagation timing
+    // Retry up to 5 times with increasing delays to handle propagation timing
     let contractAddress: string | null = null;
     let deployOutput = "";
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       if (attempt > 0) {
-        // Wait before retrying to allow WASM upload to propagate
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        await new Promise((resolve) => setTimeout(resolve, 5000));
       }
 
       const deployResult = await sandbox.exec(
