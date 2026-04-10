@@ -480,13 +480,18 @@ COMMON MISTAKES TO AVOID:
   \`use soroban_sdk::auth::{Context, ContractContext};\`
   Only include imports you actually use. Remove any unused imports.
 - The install function signature MUST be: \`pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)\`.
-- install_params is always a \`Val\` that encodes a \`Map<Val, Val>\` with Symbol keys. Decode it like this:
+- install_params may be Val::VOID (no configuration) or a Map<Val, Val> with Symbol keys. ALWAYS handle both cases:
   \`\`\`
-  let params: Map<Val, Val> = FromVal::from_val(e, &install_params);
-  let max_amount: i128 = params.get(Symbol::new(e, "max_arg_name").into_val(e)).map(|v| i128::try_from_val(e, &v).unwrap()).unwrap_or(i128::MAX);
-  let threshold: u32 = params.get(Symbol::new(e, "threshold").into_val(e)).map(|v| u32::try_from_val(e, &v).unwrap()).unwrap_or(1);
+  // Check if install_params is void (no config provided)
+  if install_params.is_void() {
+      // Store sensible defaults and return
+  } else {
+      let params: Map<Val, Val> = FromVal::from_val(e, &install_params);
+      let max_amount: i128 = params.get(Symbol::new(e, "max_arg_name").into_val(e)).map(|v| i128::try_from_val(e, &v).unwrap()).unwrap_or(i128::MAX);
+      let threshold: u32 = params.get(Symbol::new(e, "threshold").into_val(e)).map(|v| u32::try_from_val(e, &v).unwrap()).unwrap_or(1);
+  }
   \`\`\`
-  The key names follow this convention: "max_{arg_name}" for range max, "min_{arg_name}" for range min, "threshold" for threshold, "allowed_{arg_name}" for allowlists. Use .unwrap_or() with safe defaults so install succeeds even if a key is missing.
+  The key names follow this convention: "max_{arg_name}" for range max, "min_{arg_name}" for range min, "threshold" for threshold, "allowed_{arg_name}" for allowlists. Use .unwrap_or() with safe defaults so install succeeds even if a key is missing. When params is void, use maximum/permissive defaults (i128::MAX for limits, 1 for thresholds).
 - Arguments in the schema are listed in order (index 0, 1, 2, ...). When extracting args for enforcement, use the argument's position in the schema's function args list as the index. For example, if the schema lists args [from, to, amount], then from=args.get(0), to=args.get(1), amount=args.get(2).
 - For execute() wrapping, inner_args indices correspond to the argument positions in the schema (the schema already accounts for the execute wrapper).
 - The soroban-sdk auto-generates a \`PolicyContractClient\` type from \`#[contract] pub struct PolicyContract\` + \`#[contractimpl]\`. Tests use this client.
