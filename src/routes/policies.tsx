@@ -355,12 +355,11 @@ function PolicyBuilder() {
 
     try {
       for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-        const [testResult, compileResult] = await Promise.all([
-          requestTest(codeToTest, schema),
-          requestCompile(codeToTest),
-        ]);
+        // Run test first (includes compilation), then compile for WASM separately.
+        // These MUST be sequential — both use the same sandbox project directory.
+        const testResult = await requestTest(codeToTest, schema);
 
-        // Compilation succeeded — show results and break
+        // Compilation succeeded — show results
         if (testResult.compiled) {
           setTestResults(
             testResult.testCases.map((tc) => ({
@@ -375,6 +374,8 @@ function PolicyBuilder() {
           } else {
             setError(null);
           }
+          // Now compile separately to get the optimized WASM binary
+          const compileResult = await requestCompile(codeToTest);
           if (compileResult.success && compileResult.wasmBase64) {
             setWasmBase64(compileResult.wasmBase64);
           }
