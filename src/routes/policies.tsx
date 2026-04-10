@@ -661,7 +661,12 @@ function PolicyBuilder() {
       setInstallStatus("");
       setStep(5);
     } catch (err) {
-      setInstallError(err instanceof Error ? err.message : "Install failed");
+      let msg = err instanceof Error ? err.message : "Install failed";
+      // Make WebAuthn errors more user-friendly
+      if (msg.includes("timed out or was not allowed")) {
+        msg = "Passkey signing was cancelled or timed out. Please try again and approve the passkey prompt.";
+      }
+      setInstallError(msg);
       setInstallStatus("");
     } finally {
       setLoading(false);
