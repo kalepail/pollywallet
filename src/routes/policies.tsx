@@ -732,12 +732,19 @@ function PolicyBuilder() {
                   <input
                     type="text"
                     value={schema.name}
-                    onChange={(e) =>
-                      setSchema((prev) => ({ ...prev, name: e.target.value }))
-                    }
-                    placeholder="e.g. my-transfer-policy"
-                    className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-violet-500 transition-colors text-sm"
+                    onChange={(e) => {
+                      const val = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+                      setSchema((prev) => ({ ...prev, name: val.slice(0, 20) }));
+                    }}
+                    maxLength={20}
+                    placeholder="e.g. transfer-limit"
+                    className={`w-full px-4 py-3 bg-slate-700/50 border rounded-xl text-white placeholder-gray-500 focus:outline-none transition-colors text-sm ${
+                      schema.name.length > 20 ? "border-red-500" : "border-slate-600 focus:border-violet-500"
+                    }`}
                   />
+                  <p className={`text-xs mt-1 ${schema.name.length >= 18 ? "text-amber-400" : "text-gray-500"}`}>
+                    {schema.name.length}/20
+                  </p>
                 </div>
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Description</label>

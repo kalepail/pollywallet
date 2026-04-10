@@ -152,6 +152,8 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
     errors.push("name is required and must be a non-empty string");
   } else if (!/^[a-z0-9-]+$/.test(schema.name)) {
     errors.push("name must be lowercase alphanumeric with hyphens only");
+  } else if (schema.name.length > 20) {
+    errors.push("name must be 20 characters or fewer (smart account limit)");
   }
 
   if (!schema.description || typeof schema.description !== "string") {
@@ -380,7 +382,7 @@ export function schemaFromPatterns(patterns: TxPattern[]): PolicySchema {
 
   return {
     $schema: SCHEMA_VERSION,
-    name: "auto-generated-policy",
+    name: "auto-policy",
     description: `Policy for ${contracts.length} contract(s)`,
     contracts,
     globalRules,

@@ -200,6 +200,7 @@ function validateAddContextRuleInput(data: unknown): AddContextRuleInput {
   if (typeof d.installParamsXdr !== "string") throw new Error("installParamsXdr required");
   if (typeof d.ephemeralSignerPublicKey !== "string" || !d.ephemeralSignerPublicKey) throw new Error("ephemeralSignerPublicKey required");
   if (typeof d.ruleName !== "string" || !d.ruleName) throw new Error("ruleName required");
+  if ((d.ruleName as string).length > 20) throw new Error("ruleName must be 20 characters or fewer (MAX_NAME_SIZE)");
   return d as unknown as AddContextRuleInput;
 }
 
