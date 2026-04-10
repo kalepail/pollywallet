@@ -66,57 +66,77 @@ function App() {
             Send XLM
           </h2>
           <div className="space-y-3">
-            {/* Context Rule Selector */}
-            {contextRules.length > 0 && (
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Signing Rule</label>
-                <select
-                  value={selectedRuleId}
-                  onChange={(e) => setSelectedRuleId(Number(e.target.value))}
-                  className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white focus:outline-none focus:border-cyan-500 transition-colors"
-                >
-                  {contextRules.map((rule) => (
-                    <option key={rule.id} value={rule.id}>
-                      {rule.name}
-                      {rule.policies.length > 0 ? ` (${rule.policies.length} policy)` : ""}
-                      {rule.contextType === "Default" ? " — passkey" : ""}
-                      {rule.signers.some(s => s.type === "Delegated") ? " — ephemeral key" : ""}
-                    </option>
-                  ))}
-                </select>
-                {(() => {
-                  const rule = contextRules.find(r => r.id === selectedRuleId);
-                  if (rule && rule.policies.length > 0) {
-                    return (
-                      <div className="mt-2 bg-violet-500/10 border border-violet-500/30 rounded-lg px-3 py-2">
-                        <p className="text-xs text-violet-400">
-                          Policy-enforced: {rule.policies.length} policy active
-                          {rule.signers.some(s => s.type === "Delegated")
-                            ? " — signs with ephemeral key (no passkey needed)"
-                            : ""}
-                        </p>
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
-              </div>
-            )}
-            {rulesLoading && (
-              <p className="text-xs text-gray-500">Loading signing rules...</p>
-            )}
             <input type="text" placeholder="Destination (G... or C...)" value={destination}
               onChange={(e) => setDestination(e.target.value)}
               className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />
             <input type="number" placeholder="Amount (XLM)" value={amount}
               onChange={(e) => setAmount(e.target.value)} step="any" min="0"
               className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />
-            <button onClick={handleTransfer} disabled={loading || !destination || !amount}
-              className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
-            >
-              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-4 h-4" />}
-              Send
-            </button>
+
+            {/* Signing method: passkey (default) or policy-enforced rule */}
+            {(() => {
+              const policyRules = contextRules.filter(r => r.policies.length > 0);
+              if (policyRules.length === 0 && !rulesLoading) {
+                return (
+                  <button onClick={handleTransfer} disabled={loading || !destination || !amount}
+                    className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
+                  >
+                    {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-4 h-4" />}
+                    Send
+                  </button>
+                );
+              }
+              if (rulesLoading) {
+                return (
+                  <button disabled
+                    className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500/50 text-white/50 font-semibold rounded-xl"
+                  >
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Loading policies...
+                  </button>
+                );
+              }
+              // Has policy rules — show selector + send button
+              const selectedRule = contextRules.find(r => r.id === selectedRuleId);
+              const isPolicy = selectedRule && selectedRule.policies.length > 0;
+              return (
+                <>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Sign with</label>
+                    <select
+                      value={selectedRuleId}
+                      onChange={(e) => setSelectedRuleId(Number(e.target.value))}
+                      className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white focus:outline-none focus:border-cyan-500 transition-colors"
+                    >
+                      {contextRules.map((rule) => (
+                        <option key={rule.id} value={rule.id}>
+                          {rule.policies.length > 0
+                            ? `${rule.name} — policy-enforced`
+                            : `${rule.name} — passkey`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {isPolicy && (
+                    <div className="bg-violet-500/10 border border-violet-500/30 rounded-lg px-3 py-2">
+                      <p className="text-xs text-violet-400">
+                        Sends through policy-enforced rule — no passkey needed
+                      </p>
+                    </div>
+                  )}
+                  <button onClick={handleTransfer} disabled={loading || !destination || !amount}
+                    className={`w-full flex items-center justify-center gap-2 px-6 py-3 ${
+                      isPolicy
+                        ? "bg-violet-500 hover:bg-violet-600"
+                        : "bg-cyan-500 hover:bg-cyan-600"
+                    } disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors`}
+                  >
+                    {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-4 h-4" />}
+                    {isPolicy ? "Send with Policy" : "Send"}
+                  </button>
+                </>
+              );
+            })()}
           </div>
         </div>
 
