@@ -21,7 +21,7 @@ import ContractCard, {
 } from "@/components/policy/RuleCard";
 import SchemaPreview from "@/components/policy/SchemaPreview";
 import CodeEditor from "@/components/policy/CodeEditor";
-import TestResults, { type TestResult } from "@/components/policy/TestResults";
+import TestResults, { type TestResult, type BuildAttempt } from "@/components/policy/TestResults";
 import DeployPanel, { type DeployResult } from "@/components/policy/DeployPanel";
 import InstallPanel, { type InstallResult } from "@/components/policy/InstallPanel";
 import { analyzeTransaction, type TxAnalysis } from "@/lib/tx-analyzer";
@@ -82,6 +82,7 @@ function PolicyBuilder() {
 
   // Step 4: Test Results
   const [testResults, setTestResults] = useState<TestResult[]>([]);
+  const [buildTimeline, setBuildTimeline] = useState<BuildAttempt[]>([]);
 
   // Step 5: Deploy
   const [wasmBase64, setWasmBase64] = useState<string | null>(null);
@@ -350,8 +351,10 @@ function PolicyBuilder() {
     setLoading(true);
     setError(null);
     setTestResults([]);
+    setBuildTimeline([]);
 
     let codeToTest = generatedCode;
+    const timeline: BuildAttempt[] = [];
 
     try {
       for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
@@ -361,6 +364,14 @@ function PolicyBuilder() {
 
         // Compilation succeeded — show results
         if (testResult.compiled) {
+          timeline.push({
+            attempt: attempt + 1,
+            compiled: true,
+            errors: "",
+            fixed: attempt > 0,
+          });
+          setBuildTimeline([...timeline]);
+
           setTestResults(
             testResult.testCases.map((tc) => ({
               name: tc.name,
@@ -382,11 +393,33 @@ function PolicyBuilder() {
           break;
         }
 
-        // Compilation failed — try auto-fix if we have attempts left
+        // Compilation failed — record in timeline
+        // Extract just the error lines (skip "Compiling...", "Downloading..." noise)
+        const cleanErrors = testResult.compileOutput
+          .split("\n")
+          .filter(line => {
+            const t = line.trim();
+            return t && !t.startsWith("Compiling ") && !t.startsWith("Downloading ") &&
+              !t.startsWith("Downloaded ") && !t.startsWith("Blocking ");
+          })
+          .join("\n")
+          .slice(0, 3000);
+
+        timeline.push({
+          attempt: attempt + 1,
+          compiled: false,
+          errors: cleanErrors,
+          fixed: false,
+        });
+        setBuildTimeline([...timeline]);
+
+        // Try auto-fix if we have attempts left
         if (attempt < MAX_FIX_ATTEMPTS) {
           setError(`Compilation failed — auto-fixing with AI (attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS})...`);
           const fixResult = await requestFixCode(codeToTest, testResult.compileOutput);
           if (fixResult.success && fixResult.code) {
+            timeline[timeline.length - 1].fixed = true;
+            setBuildTimeline([...timeline]);
             codeToTest = fixResult.code;
             setGeneratedCode(codeToTest);
             setError(`Re-testing fixed code (attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS})...`);
@@ -848,7 +881,7 @@ function PolicyBuilder() {
 
         {step === 3 && (
           <>
-            <TestResults results={testResults} loading={loading} />
+            <TestResults results={testResults} loading={loading} buildTimeline={buildTimeline} />
             <div className="flex gap-3">
               <button
                 onClick={handleBack}
@@ -956,6 +989,7 @@ function PolicyBuilder() {
                 setStreaming(false);
                 setStreamStats({ tokenCount: 0, linesOfCode: 0, tokensPerSecond: 0, startTime: 0, status: "idle" });
                 setTestResults([]);
+                setBuildTimeline([]);
                 setWasmBase64(null);
                 setDeployResult(undefined);
                 setInstallResult(undefined);

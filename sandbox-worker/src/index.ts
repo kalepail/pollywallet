@@ -159,6 +159,29 @@ async function handleTest(
       });
     }
 
+    // Extract per-test failure output from cargo test's stdout sections
+    // Format: "---- tests::test_name stdout ----\n...output...\n\n"
+    for (const tc of testCases) {
+      if (tc.passed) {
+        tc.output = "ok";
+        continue;
+      }
+      const sectionRegex = new RegExp(
+        `---- ${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} stdout ----\\n([\\s\\S]*?)(?=\\n\\n|$)`
+      );
+      const sectionMatch = output.match(sectionRegex);
+      if (sectionMatch) {
+        tc.output = sectionMatch[1].trim().slice(0, 2000);
+      } else {
+        // Try to find the panic message directly
+        const panicRegex = new RegExp(
+          `thread '${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' panicked at ([^\\n]+)`
+        );
+        const panicMatch = output.match(panicRegex);
+        tc.output = panicMatch ? panicMatch[0].slice(0, 2000) : "(test failed — no captured output)";
+      }
+    }
+
     // Check if compilation succeeded (tests ran at all)
     const compiled = output.includes("running") || output.includes("test result");
     const success = testResult.success && testCases.every((tc) => tc.passed);

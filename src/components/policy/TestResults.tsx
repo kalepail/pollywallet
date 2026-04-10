@@ -1,4 +1,4 @@
-import { Flask, CheckCircle, XCircle, CaretDown } from "@phosphor-icons/react";
+import { Flask, CheckCircle, XCircle, CaretDown, Warning, Wrench } from "@phosphor-icons/react";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { useState } from "react";
@@ -9,21 +9,34 @@ export interface TestResult {
   output: string;
 }
 
+export interface BuildAttempt {
+  attempt: number;
+  compiled: boolean;
+  errors: string;
+  fixed: boolean;
+}
+
 interface TestResultsProps {
   results: TestResult[];
   loading?: boolean;
+  buildTimeline?: BuildAttempt[];
 }
 
-export default function TestResults({ results, loading }: TestResultsProps) {
+export default function TestResults({ results, loading, buildTimeline }: TestResultsProps) {
   const passed = results.filter((r) => r.passed).length;
   const failed = results.length - passed;
 
   return (
-    <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
+    <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6 space-y-4">
       <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
         <Flask size={20} weight="bold" className="text-violet-400" />
         Test Results
       </h2>
+
+      {/* Build Timeline */}
+      {buildTimeline && buildTimeline.length > 0 && (
+        <BuildTimeline attempts={buildTimeline} />
+      )}
 
       {loading ? (
         <div className="bg-slate-900/70 border border-slate-700 rounded-xl p-8 flex flex-col items-center justify-center gap-3">
@@ -46,6 +59,66 @@ export default function TestResults({ results, loading }: TestResultsProps) {
             ))}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+function BuildTimeline({ attempts }: { attempts: BuildAttempt[] }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (attempts.length === 0) return null;
+  if (attempts.length === 1 && attempts[0].compiled) return null; // No failures, no timeline
+
+  return (
+    <div className="border border-slate-700 rounded-xl overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-900/50 text-left"
+      >
+        <Wrench size={14} className="text-amber-400 shrink-0" />
+        <span className="text-xs text-gray-400 flex-1">
+          {attempts.length === 1
+            ? "1 build attempt"
+            : `${attempts.length} build attempts (${attempts.filter(a => !a.compiled).length} failed, ${attempts.filter(a => a.fixed).length} auto-fixed)`}
+        </span>
+        <CaretDown
+          size={14}
+          className={`text-gray-500 transition-transform ${expanded ? "rotate-180" : ""}`}
+        />
+      </button>
+      {expanded && (
+        <div className="px-4 py-3 space-y-2">
+          {attempts.map((attempt) => (
+            <div
+              key={attempt.attempt}
+              className={`border rounded-lg p-3 ${
+                attempt.compiled
+                  ? "border-emerald-500/20 bg-emerald-500/5"
+                  : "border-red-500/20 bg-red-500/5"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                {attempt.compiled ? (
+                  <CheckCircle size={12} weight="fill" className="text-emerald-400" />
+                ) : (
+                  <Warning size={12} weight="fill" className="text-red-400" />
+                )}
+                <span className="text-xs text-gray-300 font-medium">
+                  Attempt {attempt.attempt}
+                  {attempt.fixed && " → auto-fixed"}
+                  {attempt.compiled && !attempt.fixed && " → compiled"}
+                  {!attempt.compiled && !attempt.fixed && " → failed"}
+                </span>
+              </div>
+              {attempt.errors && (
+                <pre className="text-xs text-gray-500 font-mono mt-1 overflow-x-auto max-h-32 overflow-y-auto whitespace-pre-wrap">
+                  {attempt.errors}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
