@@ -322,7 +322,62 @@ export const buildPolicyExecuteTx = createServerFn({ method: "POST" })
     }
   });
 
+// --- Submit to Relayer (server function wrapper) ---
+// This wraps the relayer call so route files don't need to import
+// relayer.ts directly (which has heavy server-only dependencies that
+// cause issues when imported in TanStack Start route files).
+
+interface RelayerSubmitInput {
+  func: string;
+  auth: string[];
+}
+
+function validateRelayerSubmitInput(data: unknown): RelayerSubmitInput {
+  if (typeof data !== "object" || data === null) throw new Error("Invalid payload");
+  const d = data as Record<string, unknown>;
+  if (typeof d.func !== "string" || !d.func) throw new Error("func required");
+  if (!Array.isArray(d.auth)) throw new Error("auth required");
+  return { func: d.func as string, auth: d.auth as string[] };
+}
+
+export const submitPolicyTransaction = createServerFn({ method: "POST" })
+  .inputValidator(validateRelayerSubmitInput)
+  .handler(async ({ data }): Promise<{
+    success: boolean;
+    error: string | null;
+    hash: string | null;
+  }> => {
+    try {
+      // Lazy import to keep relayer deps server-only
+      const { ChannelsClient } = await import("@openzeppelin/relayer-plugin-channels");
+
+      const baseUrl = (globalThis as any).CHANNELS_BASE_URL
+        || (typeof process !== "undefined" ? process.env?.CHANNELS_BASE_URL : undefined)
+        || "https://channels.openzeppelin.com/testnet";
+      const apiKey = (globalThis as any).CHANNELS_API_KEY
+        || (typeof process !== "undefined" ? process.env?.CHANNELS_API_KEY : undefined);
+
+      if (!apiKey) {
+        return { success: false, error: "Relayer not configured (no API key)", hash: null };
+      }
+
+      const client = new ChannelsClient({ baseUrl, apiKey });
+      const result = await client.submitSorobanTransaction({ func: data.func, auth: data.auth });
+
+      return { success: true, error: null, hash: result.hash ?? null };
+    } catch (err: any) {
+      return { success: false, error: err.message || "Relayer request failed", hash: null };
+    }
+  });
+
 // --- Client-side convenience ---
+
+export async function requestSubmitToRelayer(params: {
+  func: string;
+  auth: string[];
+}): Promise<{ success: boolean; error: string | null; hash: string | null }> {
+  return submitPolicyTransaction({ data: params });
+}
 
 export async function requestDeploy(wasmBase64: string): Promise<DeployResult> {
   return deployPolicyWasm({ data: { wasmBase64 } });

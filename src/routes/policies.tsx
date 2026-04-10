@@ -39,7 +39,7 @@ import { requestContractSpec } from "@/lib/contract-spec";
 import { requestPolicyGeneration, requestStreamingGeneration, requestFixCode, type GenerateChunk } from "@/lib/policy-codegen";
 import type { StreamStats } from "@/components/policy/CodeEditor";
 import { requestTest, requestCompile } from "@/lib/policy-sandbox";
-import { requestDeploy, requestAddContextRule } from "@/lib/policy-deploy";
+import { requestDeploy, requestAddContextRule, requestSubmitToRelayer } from "@/lib/policy-deploy";
 import { savePolicyAfterDeploy } from "@/lib/policy-store";
 import {
   loadWallet,
@@ -56,7 +56,9 @@ import {
   LEDGERS_PER_HOUR,
   type StoredWallet,
 } from "@/lib/passkey";
-import { submitToRelayer } from "@/lib/relayer";
+// Note: do NOT import submitToRelayer from relayer.ts directly in route files.
+// It has heavy server-only deps that break the client bundle.
+// Use requestSubmitToRelayer from policy-deploy.ts instead.
 
 export const Route = createFileRoute("/policies")({ component: PolicyBuilder });
 
@@ -622,11 +624,9 @@ function PolicyBuilder() {
       }
 
       setInstallStatus("Submitting via relayer...");
-      const relayerResult = await submitToRelayer({
-        data: {
-          func: hostFunc.toXDR("base64"),
-          auth: signedAuthEntries.map((e) => e.toXDR("base64")),
-        },
+      const relayerResult = await requestSubmitToRelayer({
+        func: hostFunc.toXDR("base64"),
+        auth: signedAuthEntries.map((e) => e.toXDR("base64")),
       });
       if (!relayerResult.success) throw new Error(relayerResult.error || "Relayer failed");
 
