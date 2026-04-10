@@ -377,9 +377,9 @@ export function useWallet() {
         ]));
 
         // Build the Delegated signer's auth entry for __check_auth(auth_digest)
-        // The signature is scvVoid() — the wallet's __check_auth handles
-        // Delegated signer verification internally, not via standard Soroban
-        // address auth. The relayer processes this correctly.
+        // The wallet calls addr.require_auth_for_args((auth_digest,)) for each
+        // Delegated signer. This requires a standard Soroban address auth entry
+        // with a real ed25519 signature.
         const delegatedNonce = xdr.Int64.fromString(Date.now().toString());
         const delegatedInvocation = new xdr.SorobanAuthorizedInvocation({
           function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
@@ -392,13 +392,35 @@ export function useWallet() {
           subInvocations: [],
         });
 
+        // Sign with the ephemeral keypair using standard Soroban address auth format
+        const delegatedPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+          new xdr.HashIdPreimageSorobanAuthorization({
+            networkId,
+            nonce: delegatedNonce,
+            signatureExpirationLedger: expiration,
+            invocation: delegatedInvocation,
+          })
+        );
+        const delegatedSig = ephemeralKeypair.sign(hash(delegatedPreimage.toXDR()));
+
         const delegatedAuthEntry = new xdr.SorobanAuthorizationEntry({
           credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
             new xdr.SorobanAddressCredentials({
               address: Address.fromString(ephemeralKeypair.publicKey()).toScAddress(),
               nonce: delegatedNonce,
               signatureExpirationLedger: expiration,
-              signature: xdr.ScVal.scvVoid(),
+              signature: xdr.ScVal.scvVec([
+                xdr.ScVal.scvMap([
+                  new xdr.ScMapEntry({
+                    key: xdr.ScVal.scvSymbol("public_key"),
+                    val: xdr.ScVal.scvBytes(ephemeralKeypair.rawPublicKey()),
+                  }),
+                  new xdr.ScMapEntry({
+                    key: xdr.ScVal.scvSymbol("signature"),
+                    val: xdr.ScVal.scvBytes(delegatedSig),
+                  }),
+                ]),
+              ]),
             })
           ),
           rootInvocation: delegatedInvocation,
