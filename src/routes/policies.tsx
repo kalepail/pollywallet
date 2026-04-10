@@ -563,7 +563,7 @@ function PolicyBuilder() {
         policyAddress: deployResult.contractAddress,
         installParamsXdr,
         ephemeralSignerPublicKey: ephemeralPublicKey,
-        ruleName: schema.name || "policy-rule",
+        ruleName: (schema.name || "policy-rule").slice(0, 20),
       });
 
       if (!result.success || !result.hostFuncXdr) {
