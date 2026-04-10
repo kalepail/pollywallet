@@ -41,7 +41,22 @@ import type { StreamStats } from "@/components/policy/CodeEditor";
 import { requestTest, requestCompile } from "@/lib/policy-sandbox";
 import { requestDeploy, requestAddContextRule } from "@/lib/policy-deploy";
 import { savePolicyAfterDeploy } from "@/lib/policy-store";
-import { loadWallet, type StoredWallet } from "@/lib/passkey";
+import {
+  loadWallet,
+  buildSignaturePayload,
+  buildAuthDigest,
+  signWithPasskey,
+  buildWebAuthnSigBytes,
+  writeAuthPayload,
+  buildKeyData,
+  toI128,
+  TESTNET_RPC_URL,
+  TESTNET_NETWORK_PASSPHRASE,
+  TESTNET_WEBAUTHN_VERIFIER,
+  LEDGERS_PER_HOUR,
+  type StoredWallet,
+} from "@/lib/passkey";
+import { submitToRelayer } from "@/lib/relayer";
 
 export const Route = createFileRoute("/policies")({ component: PolicyBuilder });
 
@@ -487,21 +502,8 @@ function PolicyBuilder() {
     setInstallStatus("Generating ephemeral signer...");
 
     try {
-      const { Keypair, xdr, Account, TransactionBuilder, Operation, Address } = await import("@stellar/stellar-sdk");
+      const { Keypair, xdr, Account, TransactionBuilder, Operation, Address, scValToNative } = await import("@stellar/stellar-sdk");
       const { rpc } = await import("@stellar/stellar-sdk");
-      const {
-        buildSignaturePayload,
-        buildAuthDigest,
-        signWithPasskey,
-        buildWebAuthnSigBytes,
-        writeAuthPayload,
-        buildKeyData,
-        TESTNET_RPC_URL,
-        TESTNET_NETWORK_PASSPHRASE,
-        TESTNET_WEBAUTHN_VERIFIER,
-        LEDGERS_PER_HOUR,
-      } = await import("@/lib/passkey");
-      const { submitToRelayer } = await import("@/lib/relayer");
       const { Buffer } = await import("buffer");
 
       // Generate ephemeral keypair
@@ -513,7 +515,6 @@ function PolicyBuilder() {
       if (!targetContract) throw new Error("No target contract in schema");
 
       // Build install params as Map<Val, Val> matching the schema constraints
-      const { toI128 } = await import("@/lib/passkey");
       const entries: InstanceType<typeof xdr.ScMapEntry>[] = [];
       for (const contract of schema.contracts) {
         for (const func of contract.functions) {
@@ -552,17 +553,22 @@ function PolicyBuilder() {
       setInstallStatus("Building context rule transaction...");
 
       // Build the add_context_rule host function
-      const result = await requestAddContextRule({
-        walletContractId: wallet.contractId,
-        targetContractAddress: targetContract,
-        policyAddress: deployResult.contractAddress,
-        installParamsXdr,
-        ephemeralSignerPublicKey: ephemeralPublicKey,
-        ruleName: (schema.name || "policy-rule").slice(0, 20),
-      });
+      let result;
+      try {
+        result = await requestAddContextRule({
+          walletContractId: wallet.contractId,
+          targetContractAddress: targetContract,
+          policyAddress: deployResult.contractAddress,
+          installParamsXdr,
+          ephemeralSignerPublicKey: ephemeralPublicKey,
+          ruleName: (schema.name || "policy-rule").slice(0, 20),
+        });
+      } catch (e: any) {
+        throw new Error(`Failed to call requestAddContextRule: ${e.message}`);
+      }
 
-      if (!result.success || !result.hostFuncXdr) {
-        throw new Error(result.error || "Failed to build context rule transaction");
+      if (!result || !result.success || !result.hostFuncXdr) {
+        throw new Error(result?.error || "Failed to build context rule transaction");
       }
 
       // Simulate
@@ -578,7 +584,12 @@ function PolicyBuilder() {
         .setTimeout(30)
         .build();
 
-      const simResult = await server.simulateTransaction(simTx);
+      let simResult;
+      try {
+        simResult = await server.simulateTransaction(simTx);
+      } catch (e: any) {
+        throw new Error(`Simulation request failed: ${e.message}`);
+      }
       if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
       const simSuccess = simResult as rpc.Api.SimulateTransactionSuccessResponse;
 
@@ -631,7 +642,6 @@ function PolicyBuilder() {
         try {
           const txResult = await server.getTransaction(relayerResult.hash);
           if (txResult.status === "SUCCESS" && txResult.returnValue) {
-            const { scValToNative } = await import("@stellar/stellar-sdk");
             const native = scValToNative(txResult.returnValue);
             contextRuleId = typeof native === "object" && native.id != null ? Number(native.id) : 0;
           }
