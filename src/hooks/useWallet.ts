@@ -313,6 +313,23 @@ export function useWallet() {
         throw new Error(`No stored secret for signer ${delegatedSignerAddr?.slice(0, 10)}... — reinstall the policy to generate a new key.`);
       }
 
+      // Ensure the ephemeral signer account exists on testnet
+      // (Delegated signers need a funded account for require_auth_for_args)
+      if (usingPolicyRule && ephemeralSecret) {
+        setStatus("Checking signer account...");
+        const ephemeralKeypair = Keypair.fromSecret(ephemeralSecret);
+        try {
+          await server.getAccount(ephemeralKeypair.publicKey());
+        } catch {
+          setStatus("Funding signer account...");
+          await fetch(`${FRIENDBOT_URL}?addr=${ephemeralKeypair.publicKey()}`).catch(() => {});
+          // Wait for Friendbot to process
+          for (let i = 0; i < 10; i++) {
+            try { await server.getAccount(ephemeralKeypair.publicKey()); break; } catch { await new Promise(r => setTimeout(r, 1000)); }
+          }
+        }
+      }
+
       // --- Pass 1: Simulate to get auth entries ---
       setStatus("Simulating transfer...");
       const simAccount = new Account(
