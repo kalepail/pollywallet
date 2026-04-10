@@ -20,8 +20,7 @@ const SECP256R1_ORDER = BigInt(
 );
 
 // --- Testnet contract addresses ---
-export const TESTNET_RPC_URL = "https://soroban-testnet.stellar.org";
-export const TESTNET_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+export { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
 export const TESTNET_ACCOUNT_WASM_HASH =
   "8537b8166c0078440a5324c12f6db48d6340d157c306a54c5ea81405abcc2611";
 export const TESTNET_WEBAUTHN_VERIFIER =
