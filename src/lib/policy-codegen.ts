@@ -499,7 +499,7 @@ COMMON MISTAKES TO AVOID:
 CRITICAL RUST OWNERSHIP RULES (these cause most compilation failures):
 - Context does NOT implement Debug or PartialEq. NEVER derive Debug on structs containing Context. If you need events with context info, store only the relevant fields (fn_name, contract address) not the full Context.
 - When pattern matching on Context::Contract(ContractContext { contract, fn_name, args }), use \`ref args\` to borrow instead of move: Context::Contract(ContractContext { contract, fn_name, ref args }). This lets you still use \`context\` later.
-- Address does NOT implement Copy. When using an Address more than once, call .clone() on the FIRST use: \`address.clone()\`. Same for String, Vec, Bytes, and all soroban_sdk types.
+- Address, Symbol, String, Vec, Bytes do NOT implement Copy. When using any of these more than once, call .clone(): \`address.clone()\`, \`fn_name.clone()\`. NEVER dereference with \`*\` — use .clone() instead. For example, \`target_fn = fn_name.clone()\` not \`target_fn = *fn_name\`.
 - When building structs with Address fields from params, clone each field: \`allowed_contract: params.allowed_contract.clone()\`.
 - Prefer \`#[allow(unused_imports)]\` before your import block to suppress warnings about unused imports.
 
@@ -715,7 +715,7 @@ COMMON FIXES:
 - install must take Val: \`pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)\`
 - "doesn't implement Debug": Context does NOT implement Debug. Remove Debug from #[derive(...)] on any struct containing Context. Use only the fields you need (fn_name, contract) instead of the full Context in events.
 - "borrow of partially moved value: context": When matching Context::Contract(ContractContext { contract, fn_name, args }), change args to ref args: \`Context::Contract(ContractContext { contract, fn_name, ref args })\`
-- "use of moved value" for Address/String/Vec: These types don't implement Copy. Clone them on first use: \`value.clone()\`
+- "use of moved value" or "cannot move out of" for Address/Symbol/String/Vec: These types don't implement Copy. Use .clone() instead of dereferencing: \`fn_name.clone()\` not \`*fn_name\`
 - "cannot find type" errors: check that Signer, ContextRule, ContextRuleType are defined as #[contracttype] types in the file
 - panic_with_error! requires #[contracterror] enum`;
 }

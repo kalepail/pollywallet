@@ -184,13 +184,21 @@ async function handleTest(
 
     // Check if compilation succeeded (tests ran at all)
     const compiled = output.includes("running") || output.includes("test result");
+    const hasRealError = output.includes("error[E") || output.includes("error: could not compile");
     const success = testResult.success && testCases.every((tc) => tc.passed);
+
+    // If not compiled and no real error, this was likely a timeout during
+    // dependency download / initial compilation. Report it clearly.
+    let compileOutput = output.slice(0, 5000);
+    if (!compiled && !hasRealError && !testResult.success) {
+      compileOutput = "Build timed out (likely downloading dependencies on first run). Retrying should be faster.\n\n" + compileOutput;
+    }
 
     return Response.json({
       success,
       compiled,
       testCases,
-      compileOutput: output.slice(0, 5000),
+      compileOutput,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Sandbox test failed";
