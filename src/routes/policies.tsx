@@ -513,21 +513,22 @@ function PolicyBuilder() {
       if (!targetContract) throw new Error("No target contract in schema");
 
       // Build install params as Map<Val, Val> matching the schema constraints
-      const installParamsEntries: any[] = [];
+      const { toI128 } = await import("@/lib/passkey");
+      const entries: InstanceType<typeof xdr.ScMapEntry>[] = [];
       for (const contract of schema.contracts) {
         for (const func of contract.functions) {
           for (const arg of func.args) {
             if (!arg.constraint || arg.constraint.kind === "unconstrained") continue;
             if (arg.constraint.kind === "range" && arg.constraint.max) {
-              installParamsEntries.push(new xdr.ScMapEntry({
-                key: xdr.ScVal.scvSymbol(`max_${arg.name}`).toXDR(),
-                val: (() => {
-                  const v = BigInt(arg.constraint.max);
-                  return xdr.ScVal.scvI128(new xdr.Int128Parts({
-                    lo: xdr.Uint64.fromString((v & 0xFFFFFFFFFFFFFFFFn).toString()),
-                    hi: xdr.Int64.fromString((v >> 64n).toString()),
-                  })).toXDR();
-                })(),
+              entries.push(new xdr.ScMapEntry({
+                key: xdr.ScVal.scvSymbol(`max_${arg.name}`),
+                val: toI128(BigInt(arg.constraint.max)),
+              }));
+            }
+            if (arg.constraint.kind === "range" && arg.constraint.min) {
+              entries.push(new xdr.ScMapEntry({
+                key: xdr.ScVal.scvSymbol(`min_${arg.name}`),
+                val: toI128(BigInt(arg.constraint.min)),
               }));
             }
           }
@@ -535,23 +536,17 @@ function PolicyBuilder() {
       }
       for (const rule of schema.globalRules) {
         if (rule.type === "threshold") {
-          installParamsEntries.push(new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("threshold").toXDR(),
-            val: xdr.ScVal.scvU32(rule.params.threshold).toXDR(),
+          entries.push(new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("threshold"),
+            val: xdr.ScVal.scvU32(rule.params.threshold),
           }));
         }
       }
 
       // Build installParams ScVal
       let installParamsXdr = "";
-      if (installParamsEntries.length > 0) {
-        const installMap = xdr.ScVal.scvMap(
-          installParamsEntries.map(e => new xdr.ScMapEntry({
-            key: xdr.ScVal.fromXDR(e.key()),
-            val: xdr.ScVal.fromXDR(e.val()),
-          }))
-        );
-        installParamsXdr = installMap.toXDR("base64");
+      if (entries.length > 0) {
+        installParamsXdr = xdr.ScVal.scvMap(entries).toXDR("base64");
       }
 
       setInstallStatus("Building context rule transaction...");
