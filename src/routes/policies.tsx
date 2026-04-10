@@ -925,7 +925,6 @@ function PolicyBuilder() {
           <>
             <DeployPanel
               onDeploy={handleDeploy}
-              onInstall={() => handleInstall()}
               deployResult={deployResult}
               loading={loading && !installStatus}
             />

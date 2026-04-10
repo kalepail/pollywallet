@@ -1,4 +1,4 @@
-import { Rocket, CheckCircle, Copy, Check, ShieldCheck } from "@phosphor-icons/react";
+import { Rocket, CheckCircle, Copy, Check } from "@phosphor-icons/react";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { useState } from "react";
@@ -10,12 +10,11 @@ export interface DeployResult {
 
 interface DeployPanelProps {
   onDeploy: () => void;
-  onInstall?: (contractAddress: string) => void;
   deployResult?: DeployResult;
   loading?: boolean;
 }
 
-export default function DeployPanel({ onDeploy, onInstall, deployResult, loading }: DeployPanelProps) {
+export default function DeployPanel({ onDeploy, deployResult, loading }: DeployPanelProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -66,7 +65,7 @@ export default function DeployPanel({ onDeploy, onInstall, deployResult, loading
           )}
         </>
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-3">
           <Badge variant="success"><CheckCircle size={16} weight="fill" /> Deployed</Badge>
 
           <div className="bg-slate-900/70 border border-slate-700 rounded-xl p-4">
@@ -95,16 +94,6 @@ export default function DeployPanel({ onDeploy, onInstall, deployResult, loading
               </div>
             )}
           </div>
-
-          {onInstall && (
-            <button
-              onClick={() => onInstall(deployResult.contractAddress)}
-              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-violet-500 hover:bg-violet-600 text-white font-semibold rounded-xl transition-colors shadow-lg shadow-violet-500/25"
-            >
-              <ShieldCheck size={20} />
-              Install on Wallet
-            </button>
-          )}
         </div>
       )}
     </div>
