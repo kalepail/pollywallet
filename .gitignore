@@ -15,3 +15,7 @@ todos.json
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+.claude/
+e2e-policy-test/target/
+e2e-policy-test/test_snapshots/

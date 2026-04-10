@@ -1,0 +1,28 @@
+{
+	"name": "pollywallet-sandbox",
+	"compatibility_date": "2025-09-02",
+	"compatibility_flags": ["nodejs_compat"],
+	"main": "src/index.ts",
+	"containers": [
+		{
+			"class_name": "Sandbox",
+			"image": "./Dockerfile",
+			"instance_type": "lite",
+			"max_instances": 1
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "Sandbox",
+				"name": "Sandbox"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"new_sqlite_classes": ["Sandbox"],
+			"tag": "v1"
+		}
+	]
+}

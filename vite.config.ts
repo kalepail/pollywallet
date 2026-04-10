@@ -38,7 +38,10 @@ export default defineConfig({
     },
   },
   plugins: [
-    cloudflare({ viteEnvironment: { name: 'ssr' } }),
+    cloudflare({
+      viteEnvironment: { name: 'ssr' },
+      auxiliaryWorkers: [{ configPath: './sandbox-worker/wrangler.jsonc' }],
+    }),
     tsconfigPaths({ projects: ['./tsconfig.json'] }),
     tailwindcss(),
     tanstackStart(),
