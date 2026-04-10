@@ -13,7 +13,8 @@ import {
   scValToNative,
 } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
-import { submitToRelayer, signAndSubmitDeploy } from "../lib/relayer";
+import { signAndSubmitDeploy } from "../lib/relayer";
+import { requestSubmitToRelayer } from "../lib/policy-deploy";
 import {
   createPasskey,
   signWithPasskey,
@@ -221,11 +222,9 @@ export function useWallet() {
         simSuccess.latestLedger + LEDGERS_PER_HOUR, TESTNET_NETWORK_PASSPHRASE
       );
 
-      const relayerResult = await submitToRelayer({
-        data: {
-          func: hostFunc.toXDR("base64"),
-          auth: signedAuth.map((e) => e.toXDR("base64")),
-        },
+      const relayerResult = await requestSubmitToRelayer({
+        func: hostFunc.toXDR("base64"),
+        auth: signedAuth.map((e) => e.toXDR("base64")),
       });
       if (!relayerResult.success) throw new Error(relayerResult.error || "Fund via relayer failed");
 
@@ -380,10 +379,7 @@ export function useWallet() {
         throw new Error(`Failed to serialize auth entries: ${serErr.message}`);
       }
 
-      const relayerResult = await submitToRelayer({ data: { func: funcXdr, auth: authXdr } });
-      if (!relayerResult) {
-        throw new Error("Relayer returned undefined — check server function configuration");
-      }
+      const relayerResult = await requestSubmitToRelayer({ func: funcXdr, auth: authXdr });
       if (!relayerResult.success) throw new Error(relayerResult.error || "Relayer failed");
 
       if (relayerResult.hash) {
