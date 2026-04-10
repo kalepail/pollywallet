@@ -370,12 +370,20 @@ export function useWallet() {
 
       setStatus("Submitting via relayer...");
 
-      const relayerResult = await submitToRelayer({
-        data: {
-          func: executeHostFunc.toXDR("base64"),
-          auth: signedAuthEntries.map((e) => e.toXDR("base64")),
-        },
-      });
+      // Serialize for relayer — catch serialization errors separately
+      let funcXdr: string;
+      let authXdr: string[];
+      try {
+        funcXdr = executeHostFunc.toXDR("base64");
+        authXdr = signedAuthEntries.map((e) => e.toXDR("base64"));
+      } catch (serErr: any) {
+        throw new Error(`Failed to serialize auth entries: ${serErr.message}`);
+      }
+
+      const relayerResult = await submitToRelayer({ data: { func: funcXdr, auth: authXdr } });
+      if (!relayerResult) {
+        throw new Error("Relayer returned undefined — check server function configuration");
+      }
       if (!relayerResult.success) throw new Error(relayerResult.error || "Relayer failed");
 
       if (relayerResult.hash) {
