@@ -508,14 +508,20 @@ function PolicyBuilder() {
       const { rpc } = await import("@stellar/stellar-sdk");
       const { Buffer } = await import("buffer");
 
-      // Generate ephemeral keypair and save secret immediately.
+      // Generate ephemeral keypair and save secret to localStorage immediately.
       // Must persist before the relayer call — if the install crashes after
       // signing but before completion, the key is still recoverable.
       const ephemeralKeypair = Keypair.random();
       const ephemeralPublicKey = ephemeralKeypair.publicKey();
-      const ephemeralSigners = JSON.parse(localStorage.getItem("pollywallet:ephemeral-signers") || "{}");
-      ephemeralSigners[ephemeralPublicKey] = ephemeralKeypair.secret();
-      localStorage.setItem("pollywallet:ephemeral-signers", JSON.stringify(ephemeralSigners));
+      try {
+        const existing = JSON.parse(localStorage.getItem("pollywallet:ephemeral-signers") || "{}");
+        existing[ephemeralPublicKey] = ephemeralKeypair.secret();
+        localStorage.setItem("pollywallet:ephemeral-signers", JSON.stringify(existing));
+        console.log("[PollyWallet] Saved ephemeral signer:", ephemeralPublicKey);
+      } catch (storageErr) {
+        console.error("[PollyWallet] Failed to save ephemeral signer to localStorage:", storageErr);
+        // Don't block the install — worst case the user has to reinstall
+      }
 
       // Determine the target contract from the schema
       const targetContract = schema.contracts[0]?.address;
