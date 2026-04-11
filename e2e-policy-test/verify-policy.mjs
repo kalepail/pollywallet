@@ -31,9 +31,13 @@ import {
   nativeToScVal,
   scValToNative,
   Contract,
+  Operation,
+  hash,
   BASE_FEE,
 } from "@stellar/stellar-sdk";
-import { Server } from "@stellar/stellar-sdk/rpc";
+import { Server, assembleTransaction } from "@stellar/stellar-sdk/rpc";
+import { ChannelsClient } from "@openzeppelin/relayer-plugin-channels";
+import { readFileSync } from "fs";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -63,6 +67,18 @@ const server = new Server(RPC_URL);
 const keypair = Keypair.random();
 const publicKey = keypair.publicKey();
 const results = { passed: 0, failed: 0, txHashes: {} };
+
+// Relayer setup
+const devVars = readFileSync(new URL("../.dev.vars", import.meta.url), "utf8");
+const apiKey = devVars.match(/CHANNELS_API_KEY=(.+)/)?.[1]?.trim();
+if (!apiKey) {
+  console.error("ERROR: CHANNELS_API_KEY not found in .dev.vars");
+  process.exit(1);
+}
+const relayer = new ChannelsClient({
+  baseUrl: "https://channels.openzeppelin.com/testnet",
+  apiKey,
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -203,46 +219,130 @@ function buildSigners() {
 }
 
 /**
- * Submit a contract invocation and wait for the result.
+ * Submit a contract invocation via the relayer and wait for the result.
  * When expectSimFailure is true, a simulation error is treated as the expected outcome.
  */
 async function callContract(functionName, args, { expectSimFailure = false } = {}) {
-  const account = await server.getAccount(publicKey);
   const contract = new Contract(POLICY_CONTRACT_ID);
 
+  // Build the host function
+  const hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
+    new xdr.InvokeContractArgs({
+      contractAddress: Address.fromString(POLICY_CONTRACT_ID).toScAddress(),
+      functionName,
+      args,
+    })
+  );
+
+  // Simulate to get auth entries
+  const account = await server.getAccount(publicKey);
   const tx = new TransactionBuilder(account, {
-    fee: (parseInt(BASE_FEE) * 100).toString(),
+    fee: "100",
     networkPassphrase: NETWORK_PASSPHRASE,
   })
-    .addOperation(contract.call(functionName, ...args))
+    .addOperation(Operation.invokeHostFunction({ func: hostFunc, auth: [] }))
     .setTimeout(60)
     .build();
 
-  // Simulate
-  let preparedTx;
+  let simResult;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    simResult = await server.simulateTransaction(tx);
   } catch (simErr) {
     if (expectSimFailure) {
-      return {
-        hash: null,
-        success: false,
-        simulationError: simErr.message || String(simErr),
-      };
+      return { hash: null, success: false, simulationError: simErr.message || String(simErr) };
     }
     throw simErr;
   }
 
+  if ("error" in simResult) {
+    if (expectSimFailure) {
+      return { hash: null, success: false, simulationError: simResult.error };
+    }
+    throw new Error(`Simulation failed: ${simResult.error}`);
+  }
+
   if (expectSimFailure) {
-    // Simulation succeeded when we expected failure
     return { hash: null, success: true, simulationError: null };
   }
 
-  preparedTx.sign(keypair);
+  // If no auth entries needed (read-only call), submit directly
+  if ((simResult.result?.auth ?? []).length === 0) {
+    const assembled = assembleTransaction(tx, simResult).build();
+    assembled.sign(keypair);
+    const directResult = await server.sendTransaction(assembled);
+    if (directResult.status === "ERROR") throw new Error(`Send failed: ${JSON.stringify(directResult)}`);
+    let getResult;
+    for (let i = 0; i < 30; i++) {
+      getResult = await server.getTransaction(directResult.hash);
+      if (getResult.status !== "NOT_FOUND") break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (getResult.status === "SUCCESS") {
+      let returnValue = null;
+      if (getResult.returnValue) { try { returnValue = scValToNative(getResult.returnValue); } catch {} }
+      return { hash: directResult.hash, success: true, result: getResult, returnValue };
+    }
+    throw new Error(`${functionName} failed: ${getResult.status}`);
+  }
 
-  const sendResult = await server.sendTransaction(preparedTx);
-  if (sendResult.status === "ERROR") {
-    throw new Error(`Transaction send failed: ${JSON.stringify(sendResult, null, 2)}`);
+  // Sign auth entries with the test keypair
+  const LEDGERS_PER_HOUR = 720;
+  const expiration = simResult.latestLedger + LEDGERS_PER_HOUR;
+  const networkId = hash(Buffer.from(NETWORK_PASSPHRASE));
+  const authEntries = simResult.result?.auth ?? [];
+
+  const signedAuth = authEntries.map((entry) => {
+    const credType = entry.credentials().switch().name;
+    if (credType === "sorobanCredentialsSourceAccount") {
+      const nonce = xdr.Int64.fromString(Date.now().toString());
+      const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+        new xdr.HashIdPreimageSorobanAuthorization({
+          networkId, nonce, signatureExpirationLedger: expiration,
+          invocation: entry.rootInvocation(),
+        })
+      );
+      const sig = keypair.sign(hash(preimage.toXDR()));
+      return new xdr.SorobanAuthorizationEntry({
+        credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+          new xdr.SorobanAddressCredentials({
+            address: Address.fromString(publicKey).toScAddress(),
+            nonce, signatureExpirationLedger: expiration,
+            signature: xdr.ScVal.scvVec([xdr.ScVal.scvMap([
+              new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("public_key"), val: xdr.ScVal.scvBytes(keypair.rawPublicKey()) }),
+              new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("signature"), val: xdr.ScVal.scvBytes(sig) }),
+            ])]),
+          })
+        ),
+        rootInvocation: entry.rootInvocation(),
+      });
+    }
+    if (credType === "sorobanCredentialsAddress") {
+      const creds = entry.credentials().address();
+      creds.signatureExpirationLedger(expiration);
+      const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+        new xdr.HashIdPreimageSorobanAuthorization({
+          networkId, nonce: creds.nonce(), signatureExpirationLedger: expiration,
+          invocation: entry.rootInvocation(),
+        })
+      );
+      const sig = keypair.sign(hash(preimage.toXDR()));
+      creds.signature(xdr.ScVal.scvVec([xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("public_key"), val: xdr.ScVal.scvBytes(keypair.rawPublicKey()) }),
+        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("signature"), val: xdr.ScVal.scvBytes(sig) }),
+      ])]));
+    }
+    return entry;
+  });
+
+  // Submit via relayer
+  let sendResult;
+  try {
+    sendResult = await relayer.submitSorobanTransaction({
+      func: hostFunc.toXDR("base64"),
+      auth: signedAuth.map((e) => e.toXDR("base64")),
+    });
+  } catch (relayerErr) {
+    throw new Error(`Relayer failed: ${relayerErr.message}`);
   }
 
   // Poll for confirmation
@@ -256,11 +356,7 @@ async function callContract(functionName, args, { expectSimFailure = false } = {
   if (getResult.status === "SUCCESS") {
     let returnValue = null;
     if (getResult.returnValue) {
-      try {
-        returnValue = scValToNative(getResult.returnValue);
-      } catch {
-        // Some return values can't be natively decoded
-      }
+      try { returnValue = scValToNative(getResult.returnValue); } catch {}
     }
     return { hash: sendResult.hash, success: true, result: getResult, returnValue };
   } else {
