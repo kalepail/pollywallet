@@ -523,6 +523,11 @@ function PolicyBuilder() {
         // Don't block the install — worst case the user has to reinstall
       }
 
+      // Fund the ephemeral signer — needed as the simulation source
+      // and for require_auth_for_args on the Delegated signer
+      setInstallStatus("Funding ephemeral signer...");
+      await fetch(`https://friendbot.stellar.org?addr=${ephemeralPublicKey}`).catch(() => {});
+
       // Determine the target contract from the schema
       const targetContract = schema.contracts[0]?.address;
       if (!targetContract) throw new Error("No target contract in schema");

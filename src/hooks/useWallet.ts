@@ -315,10 +315,30 @@ export function useWallet() {
 
       // --- Pass 1: Simulate to get auth entries ---
       setStatus("Simulating transfer...");
-      const simAccount = new Account(
-        usingPolicyRule ? (delegatedSignerAddr!) : Keypair.random().publicKey(),
-        "0"
-      );
+
+      // For policy transfers, the ephemeral signer needs to be funded and used
+      // as the simulation source with a real sequence number
+      let simSourcePublic: string;
+      if (usingPolicyRule && ephemeralSecret) {
+        const ek = Keypair.fromSecret(ephemeralSecret);
+        try {
+          await server.getAccount(ek.publicKey());
+        } catch {
+          setStatus("Funding signer account...");
+          await fetch(`${FRIENDBOT_URL}?addr=${ek.publicKey()}`).catch(() => {});
+          // Wait for account to be visible
+          for (let i = 0; i < 10; i++) {
+            try { await server.getAccount(ek.publicKey()); break; } catch { await new Promise(r => setTimeout(r, 1000)); }
+          }
+        }
+        simSourcePublic = ek.publicKey();
+      } else {
+        simSourcePublic = Keypair.random().publicKey();
+      }
+
+      const simAccount = usingPolicyRule
+        ? await server.getAccount(simSourcePublic)
+        : new Account(simSourcePublic, "0");
       const simTx = new TransactionBuilder(simAccount, {
         fee: BASE_FEE,
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
