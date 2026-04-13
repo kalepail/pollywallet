@@ -28,7 +28,13 @@ export default defineConfig({
   },
   ssr: {
     optimizeDeps: {
-      include: ['@openzeppelin/relayer-plugin-channels'],
+      include: [
+        '@openzeppelin/relayer-plugin-channels',
+        '@stellar/stellar-sdk',
+        '@stellar/stellar-sdk/rpc',
+        '@stellar/stellar-sdk/contract',
+        'buffer',
+      ],
     },
   },
   build: {

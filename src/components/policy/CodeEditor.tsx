@@ -153,7 +153,7 @@ export default function CodeEditor({
           />
         ) : highlightedHtml && !streaming ? (
           <div
-            className="overflow-x-auto max-h-[32rem] overflow-y-auto [&>pre]:p-4 [&>pre]:m-0 [&>pre]:bg-transparent [&>pre]:text-sm [&>pre]:leading-relaxed"
+            className="[&>pre]:p-4 [&>pre]:m-0 [&>pre]:bg-transparent [&>pre]:text-sm [&>pre]:leading-relaxed [&>pre]:!overflow-auto [&>pre]:max-h-[32rem]"
             dangerouslySetInnerHTML={{ __html: highlightedHtml }}
           />
         ) : (

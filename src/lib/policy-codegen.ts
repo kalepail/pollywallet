@@ -504,12 +504,14 @@ CRITICAL RUST OWNERSHIP RULES (these cause most compilation failures):
 - Prefer \`#[allow(unused_imports)]\` before your import block to suppress warnings about unused imports.
 
 UNDERSTANDING AUTHORIZATION CONTEXT (CRITICAL):
-This policy will be attached to a Default context rule, meaning enforce() is called for EVERY auth context in the transaction. The policy must handle all contexts correctly.
+This policy may be attached to either a Default or CallContract context rule.
+- CallContract rules scope enforcement to a specific target contract. enforce() receives the DIRECT function call context (Pattern 2 below). This is the most common case for PollyWallet policies.
+- Default rules match ALL auth contexts, meaning enforce() is called for every auth in the transaction and must handle all patterns.
 
-enforce() receives Context::Contract(ContractContext { contract, fn_name, args }) for each authorization. There are TWO patterns:
+enforce() receives Context::Contract(ContractContext { contract, fn_name, args }) for each authorization. There are TWO patterns — your code MUST handle BOTH:
 
-PATTERN 1 — EXECUTE WRAPPING (most common):
-When the smart wallet calls execute(target, fn, args), Soroban auto-satisfies require_auth for direct sub-calls. enforce() sees:
+PATTERN 1 — EXECUTE WRAPPING (Default context rules only):
+When the smart wallet calls execute(target, fn, args), enforce() sees:
   - fn_name = symbol_short!("execute")
   - args[0] = target contract Address
   - args[1] = inner function name (Symbol)
@@ -521,8 +523,8 @@ To enforce rules, extract the inner call:
   let inner_args: Vec<Val> = args.get(2).unwrap().try_into_val(e).unwrap();
   // Then apply arg-indexed rules against inner_args
 
-PATTERN 2 — SUB-INVOCATION (DeFi/cross-contract):
-When an intermediate contract (not the wallet) calls require_auth(wallet), a separate auth context is created. enforce() sees:
+PATTERN 2 — DIRECT CALL (CallContract context rules, or sub-invocations):
+enforce() sees the actual function call directly:
   - fn_name = the actual function name (e.g. "transfer", "swap", "deposit")
   - contract = the actual contract address
   - args = the raw function arguments
@@ -532,11 +534,13 @@ UNDERSTANDING CONSTRAINTS AND NOTES (CRITICAL):
 The schema uses per-argument constraints and natural language notes. Each argument has a name, type, and optional constraint.
 
 CONSTRAINT KINDS:
-- "exact" { value }: The argument must equal this exact value. Panic otherwise.
-- "range" { min?, max? }: The numeric argument must be within [min, max]. Panic if outside.
-- "allowlist" { values[] }: The argument (typically Address) must be one of the listed values. Panic otherwise.
+- "exact" { value }: The argument must equal this SPECIFIC value at runtime. ANY other value must be rejected. Only use when the schema explicitly sets this constraint.
+- "range" { min?, max? }: The numeric argument must be within [min, max]. Panic if outside. Store limits via install_params so they can be reconfigured.
+- "allowlist" { values[] }: The argument must be one of the listed values. Panic otherwise.
 - "blocklist" { values[] }: The argument must NOT be one of the listed values. Panic if it matches.
-- "unconstrained": No structural constraint — any value is allowed.
+- "unconstrained" (or absent): No constraint — the argument may be ANY valid value. Do NOT restrict it. Do NOT hardcode any value for it. Do NOT infer restrictions from the schema JSON. If a constraint is not explicitly set, the argument is unrestricted.
+
+CRITICAL: Only enforce constraints that are EXPLICITLY declared in the schema. Arguments without a constraint (or with kind "unconstrained") MUST allow any value. Never infer or assume constraints from argument names, types, or any other schema metadata.
 
 NOTES:
 Each function and each argument can have a "note" field containing natural language guidance. Use these notes to implement complex enforcement behaviors that constraints alone cannot express. Examples:
@@ -583,11 +587,12 @@ Copy the Signer, ContextRule, ContextRuleType types inline into your contract.
 Follow the enforce/install/uninstall patterns from the references exactly.
 Name your contract struct PolicyContract.
 
-IMPORTANT: This policy will be used with a Default context rule. Your enforce() function MUST:
-- Handle BOTH the "execute" wrapper pattern AND direct contract call patterns
+IMPORTANT: Your enforce() function MUST:
+- Handle BOTH the "execute" wrapper pattern AND direct contract call patterns (the context rule type determines which fires at runtime, but the code should support both)
 - DEFAULT-REJECT any unrecognized function name or contract address
 - Extract inner call details from execute() args when fn_name is "execute"
 - Apply argument rules using positional indices matching the schema's arg order (0, 1, 2, ...)
+- ONLY enforce constraints that are explicitly declared in the schema — unconstrained arguments must pass through without any checks
 - Be called potentially multiple times per transaction (once per auth context)`;
 }
 
@@ -620,7 +625,20 @@ function buildInstallParamsKeyList(schema: PolicySchema): string {
 }
 
 export function buildUserPrompt(schema: PolicySchema): string {
-  const schemaJson = schemaToJSON(schema);
+  // Strip observedValues from the schema before sending to AI.
+  // These are informational (for the user's UI) and should NOT influence
+  // code generation — the AI should only act on explicit constraints.
+  const sanitizedSchema: PolicySchema = {
+    ...schema,
+    contracts: schema.contracts.map(c => ({
+      ...c,
+      functions: c.functions.map(f => ({
+        ...f,
+        args: f.args.map(({ observedValues: _, ...rest }) => rest),
+      })),
+    })),
+  };
+  const schemaJson = schemaToJSON(sanitizedSchema);
 
   // Build a human-readable summary with constraints and notes
   const contractSummary = schema.contracts.map(c => {
@@ -679,7 +697,7 @@ install_params is a Map<Val, Val> with these Symbol keys (decode each with .get(
 ${buildInstallParamsKeyList(schema)}
 
 CRITICAL SECURITY REQUIREMENTS:
-- This policy will be attached to a Default context rule (matches all auth contexts)
+- This policy will be attached to a CallContract context rule scoped to the contract(s) listed below. enforce() will receive DIRECT call contexts (Pattern 2). However, the code should also handle execute() wrapper calls (Pattern 1) for forward compatibility.
 - The enforce() function must handle both execute() wrapper calls and direct contract calls
 - ONLY the contracts listed above are permitted. ALL other contracts must be REJECTED (panic).
 - ONLY the functions listed under each contract are permitted. ALL other functions must be REJECTED.

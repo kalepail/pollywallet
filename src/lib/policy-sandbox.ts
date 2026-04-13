@@ -91,7 +91,7 @@ fn create_test_signers(env: &soroban_sdk::Env, count: u32) -> soroban_sdk::Vec<S
 
 fn build_default_args(env: &soroban_sdk::Env) -> soroban_sdk::Vec<soroban_sdk::Val> {
     let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(env);
-${generateArgBuilderLines(firstFuncArgs, "    ", "default").replace(/&env/g, "env")}
+${generateArgBuilderLines(firstFuncArgs, "    ", "default", { useConstraintValues: true }).replace(/&env/g, "env")}
     args
 }
 
@@ -130,6 +130,24 @@ fn test_uninstall_succeeds() {
     client.uninstall(&context_rule, &smart_account);
 }`);
 
+  // Basic enforce success test — catches policies that crash on ANY enforce() call.
+  // Uses constraint-satisfying values (exact values where set, valid defaults otherwise).
+  tests.push(`
+#[test]
+fn test_enforce_basic_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    let args = build_default_args(&env);
+    let context = create_function_context(&env, args);
+    let signers = create_test_signers(&env, 1);
+    client.enforce(&context, &signers, &context_rule, &smart_account);
+}`);
+
   // Constraint-based tests per argument
   for (const contract of schema.contracts) {
     for (const func of contract.functions) {
@@ -139,9 +157,32 @@ fn test_uninstall_succeeds() {
         if (!arg.constraint || arg.constraint.kind === "unconstrained") continue;
 
         switch (arg.constraint.kind) {
-          case "exact":
-            // No auto-generated test — exact match logic depends on types
+          case "exact": {
+            // Negative test: use a DIFFERENT value to prove the exact enforcement works.
+            // This makes exact constraints visible in test output and catches
+            // policies that silently pass when they should reject.
+            const wrongValue = generateWrongValueForType(arg.type, arg.constraint.value);
+            if (wrongValue) {
+              tests.push(`
+#[test]
+#[should_panic]
+fn test_enforce_${arg.name}_wrong_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
+${generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: wrongValue }, useConstraintValues: true })}
+    let context = create_function_context(&env, args);
+    let signers = create_test_signers(&env, 1);
+    client.enforce(&context, &signers, &context_rule, &smart_account);
+}`);
+            }
             break;
+          }
 
           case "range":
             if (arg.constraint.max) {
@@ -317,20 +358,45 @@ interface ArgOverride {
   overrideValue: string;
 }
 
+interface ArgBuilderOpts {
+  override_?: ArgOverride;
+  /** When true, use exact/allowlist constraint values instead of generic defaults. */
+  useConstraintValues?: boolean;
+}
+
 function generateArgBuilderLines(
   args: ArgPermission[],
   indent: string,
   _mode: "default" = "default",
-  override_?: ArgOverride,
+  optsOrOverride?: ArgOverride | ArgBuilderOpts,
 ): string {
   if (args.length === 0) {
     return `${indent}// No args`;
   }
 
+  // Normalize legacy ArgOverride param to ArgBuilderOpts
+  const opts: ArgBuilderOpts = optsOrOverride && "overrideIndex" in optsOrOverride
+    ? { override_: optsOrOverride }
+    : (optsOrOverride as ArgBuilderOpts | undefined) ?? {};
+
   return args.map((a, i) => {
     // If this arg has an override, use the override value directly
-    if (override_ && i === override_.overrideIndex) {
-      return `${indent}args.push_back(${override_.overrideValue}.into_val(&env)); // ${a.name} (overridden)`;
+    if (opts.override_ && i === opts.override_.overrideIndex) {
+      return `${indent}args.push_back(${opts.override_.overrideValue}.into_val(&env)); // ${a.name} (overridden)`;
+    }
+
+    // When useConstraintValues is set, use exact/allowlist values so the
+    // enforce test passes with the constraint-satisfying inputs.
+    if (opts.useConstraintValues && a.constraint) {
+      if (a.constraint.kind === "exact") {
+        return `${indent}args.push_back(${generateLiteralForType(a.type, a.constraint.value)}.into_val(&env)); // ${a.name} (exact)`;
+      }
+      if (a.constraint.kind === "allowlist" && a.constraint.values.length > 0) {
+        return `${indent}args.push_back(${generateLiteralForType(a.type, a.constraint.values[0])}.into_val(&env)); // ${a.name} (allowlisted)`;
+      }
+      if (a.constraint.kind === "range" && a.constraint.min != null) {
+        return `${indent}args.push_back(${a.constraint.min}${numericSuffix(a.type)}.into_val(&env)); // ${a.name} (range min)`;
+      }
     }
 
     const t = a.type.toLowerCase();
@@ -364,6 +430,32 @@ function generateLiteralForType(argType: string, value: string): string {
   if (t === "bool") return value === "true" ? "true" : "false";
   if (t === "symbol") return `soroban_sdk::Symbol::new(&env, "${value}")`;
   return `soroban_sdk::Val::VOID`;
+}
+
+/**
+ * Generate a Rust literal that is a DIFFERENT value from the given one.
+ * Used for exact-constraint negative tests — the returned value must NOT
+ * match the constraint so enforce() should reject it.
+ */
+function generateWrongValueForType(argType: string, exactValue: string): string | null {
+  const t = argType.toLowerCase();
+  if (t === "address") {
+    // Use a randomly generated address (guaranteed different from any specific address)
+    return `<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env)`;
+  }
+  if (["i128", "u128", "i64", "u64", "i32", "u32"].includes(t)) {
+    // Use a value that's different from the exact value
+    const n = BigInt(exactValue || "0");
+    const wrong = n === 0n ? 1n : n + 1n;
+    return `${wrong}${numericSuffix(t)}`;
+  }
+  if (t === "bool") {
+    return exactValue === "true" ? "false" : "true";
+  }
+  if (t === "symbol") {
+    return `soroban_sdk::Symbol::new(&env, "__wrong__")`;
+  }
+  return null; // Can't generate a wrong value for complex types
 }
 
 /** Get the numeric suffix for a Rust numeric type. */

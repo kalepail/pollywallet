@@ -310,14 +310,55 @@ async function handleDeploy(
 
     const installOutput = (installResult.stdout + installResult.stderr).trim();
 
-    // Extract the WASM hash from the install output
-    const hashMatch = installOutput.match(/([a-f0-9]{64})/);
-    const wasmHash = hashMatch ? hashMatch[1] : null;
+    // The install command must succeed before we extract the hash.
+    // Otherwise the CLI may print the locally-computed hash in an error
+    // message and we'd try to deploy code that never made it on-ledger.
+    if (!installResult.success) {
+      // If the deployer is out of funds, try to re-fund and retry once
+      if (installOutput.includes("insufficient") || installOutput.includes("NotFound") || installOutput.includes("not found")) {
+        const fundResult = await sandbox.exec(
+          `stellar keys fund deployer --network testnet 2>&1`,
+          { timeout: 60_000 }
+        );
+
+        const retryResult = await sandbox.exec(
+          `stellar contract install --wasm ${wasmPath} --source-account deployer --network testnet 2>&1`,
+          { timeout: 120_000 }
+        );
+
+        const retryOutput = (retryResult.stdout + retryResult.stderr).trim();
+        if (!retryResult.success) {
+          return Response.json({
+            success: false,
+            error: `WASM install failed after re-funding deployer: ${retryOutput.slice(0, 2000)}`,
+            wasmHash: null,
+            contractAddress: null,
+          });
+        }
+
+        // Use the retry output for hash extraction below
+        Object.assign(installResult, retryResult);
+      } else {
+        return Response.json({
+          success: false,
+          error: `WASM install failed (exit code non-zero): ${installOutput.slice(0, 2000)}`,
+          wasmHash: null,
+          contractAddress: null,
+        });
+      }
+    }
+
+    // Extract the WASM hash — only from successful install output.
+    // The hash is the last 64-char hex string (the CLI may print a
+    // transaction hash before it).
+    const finalOutput = (installResult.stdout + installResult.stderr).trim();
+    const allHashes = [...finalOutput.matchAll(/([a-f0-9]{64})/g)].map(m => m[1]);
+    const wasmHash = allHashes.length > 0 ? allHashes[allHashes.length - 1] : null;
 
     if (!wasmHash) {
       return Response.json({
         success: false,
-        error: `WASM install failed: ${installOutput.slice(0, 2000)}`,
+        error: `WASM install succeeded but no hash found in output: ${finalOutput.slice(0, 2000)}`,
         wasmHash: null,
         contractAddress: null,
       });

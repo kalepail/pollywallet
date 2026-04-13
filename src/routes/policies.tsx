@@ -43,16 +43,10 @@ import { requestDeploy, requestAddContextRule, requestSubmitToRelayer } from "@/
 import { savePolicyAfterDeploy } from "@/lib/policy-store";
 import {
   loadWallet,
-  buildSignaturePayload,
-  buildAuthDigest,
-  signWithPasskey,
-  buildWebAuthnSigBytes,
-  writeAuthPayload,
-  buildKeyData,
+  signWalletAuthEntries,
   toI128,
   TESTNET_RPC_URL,
   TESTNET_NETWORK_PASSPHRASE,
-  TESTNET_WEBAUTHN_VERIFIER,
   LEDGERS_PER_HOUR,
   type StoredWallet,
 } from "@/lib/passkey";
@@ -611,28 +605,12 @@ function PolicyBuilder() {
 
       // Sign with passkey
       setInstallStatus("Sign with your passkey...");
-      const keyData = buildKeyData(Buffer.from(wallet.publicKey, "hex"), wallet.credentialId);
-      const signer = { tag: "External" as const, values: [TESTNET_WEBAUTHN_VERIFIER, keyData] as const };
-
-      const signedAuthEntries: xdr.SorobanAuthorizationEntry[] = [];
-      for (const entry of authEntries) {
-        const credType = entry.credentials().switch().name;
-        if (credType === "sorobanCredentialsAddress") {
-          const credentials = entry.credentials().address();
-          credentials.signatureExpirationLedger(expiration);
-          if (Address.fromScAddress(credentials.address()).toString() === wallet.contractId) {
-            const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, entry, expiration);
-            const authDigest = buildAuthDigest(sigPayload, [0]);
-            const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
-            credentials.signature(
-              writeAuthPayload([0], signer, buildWebAuthnSigBytes(webAuthnResult))
-            );
-          }
-          signedAuthEntries.push(entry);
-        } else {
-          signedAuthEntries.push(entry);
-        }
-      }
+      const signedAuthEntries = await signWalletAuthEntries({
+        authEntries,
+        wallet,
+        contextRuleIds: [0],
+        expiration,
+      });
 
       setInstallStatus("Submitting via relayer...");
       const relayerResult = await requestSubmitToRelayer({

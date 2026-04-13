@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Wallet, ShieldCheck } from "@phosphor-icons/react";
+import { Wallet, ShieldCheck, ListBullets } from "@phosphor-icons/react";
 import { Badge } from "@cloudflare/kumo/components/badge";
 
 export default function Header() {
@@ -13,6 +13,13 @@ export default function Header() {
         <Badge variant="teal">Testnet</Badge>
       </span>
       <nav className="ml-auto flex items-center gap-4">
+        <Link
+          to="/rules"
+          className="flex items-center gap-2 text-sm text-gray-400 hover:text-cyan-400 transition-colors"
+        >
+          <ListBullets size={16} weight="bold" />
+          Rules
+        </Link>
         <Link
           to="/policies"
           className="flex items-center gap-2 text-sm text-gray-400 hover:text-violet-400 transition-colors"

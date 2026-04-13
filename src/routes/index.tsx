@@ -108,13 +108,22 @@ function App() {
                       onChange={(e) => setSelectedRuleId(Number(e.target.value))}
                       className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white focus:outline-none focus:border-cyan-500 transition-colors"
                     >
-                      {contextRules.map((rule) => (
-                        <option key={rule.id} value={rule.id}>
-                          {rule.policies.length > 0
-                            ? `${rule.name} — policy-enforced`
-                            : `${rule.name} — passkey`}
-                        </option>
-                      ))}
+                      {contextRules.map((rule) => {
+                        const target = rule.targetContract
+                          ? ` ${rule.targetContract.slice(0, 8)}...`
+                          : "";
+                        const policyCount = rule.policies.length > 0
+                          ? ` (${rule.policies.length} ${rule.policies.length === 1 ? "policy" : "policies"})`
+                          : "";
+                        const label = rule.policies.length > 0
+                          ? `#${rule.id} ${rule.name} —${target}${policyCount}`
+                          : `#${rule.id} ${rule.name} — passkey`;
+                        return (
+                          <option key={rule.id} value={rule.id}>
+                            {label}
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
                   {isPolicy && (
