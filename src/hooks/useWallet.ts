@@ -34,6 +34,7 @@ import {
   TESTNET_NETWORK_PASSPHRASE,
   TESTNET_ACCOUNT_WASM_HASH,
   TESTNET_WEBAUTHN_VERIFIER,
+  TESTNET_ED25519_VERIFIER,
   TESTNET_NATIVE_TOKEN_CONTRACT,
   FRIENDBOT_URL,
   DEPLOYER_PUBLIC_KEY,
@@ -306,11 +307,21 @@ export function useWallet() {
         );
       }
 
-      const delegatedSignerAddr = selectedRule?.signers.find(s => s.type === "Delegated")?.address;
-      const ephemeralSecret = delegatedSignerAddr ? loadEphemeralSigners()[delegatedSignerAddr] : null;
+      // Find the ephemeral signer — supports both External (ed25519 verifier) and legacy Delegated signers.
+      const ephemeralSigner = selectedRule?.signers.find(s => s.type === "External" || s.type === "Delegated");
+      let ephemeralSecret: string | null = null;
+      if (ephemeralSigner) {
+        if (ephemeralSigner.type === "External" && ephemeralSigner.keyData) {
+          // External signer: derive G-address from raw public key to look up the stored secret
+          const gAddr = Keypair.fromRawEd25519PublicKey(Buffer.from(ephemeralSigner.keyData)).publicKey();
+          ephemeralSecret = loadEphemeralSigners()[gAddr] ?? null;
+        } else {
+          ephemeralSecret = loadEphemeralSigners()[ephemeralSigner.address] ?? null;
+        }
+      }
 
       if (usingPolicyRule && !ephemeralSecret) {
-        throw new Error(`No stored secret for signer ${delegatedSignerAddr?.slice(0, 10)}... — reinstall the policy to generate a new key.`);
+        throw new Error("No stored secret for ephemeral signer — reinstall the policy to generate a new key.");
       }
 
       // --- Pass 1: Simulate to get auth entries ---
@@ -338,97 +349,40 @@ export function useWallet() {
       let signedAuthEntries: xdr.SorobanAuthorizationEntry[];
 
       if (usingPolicyRule && ephemeralSecret) {
-        // --- Policy-enforced: two-pass auth with Delegated signer ---
+        // --- Policy-enforced: External signer with ed25519 verifier ---
+        // Signs the auth_digest directly with the ephemeral ed25519 key.
+        // The signature goes inline in the wallet's AuthPayload — no separate
+        // auth entry needed (unlike Delegated signers which require the account
+        // to exist on the ledger for require_auth_for_args).
         setStatus("Signing with ephemeral key...");
         const ephemeralKeypair = Keypair.fromSecret(ephemeralSecret);
-        const networkId = hash(Buffer.from(TESTNET_NETWORK_PASSPHRASE));
 
-        // Find the wallet's auth entry from pass 1
         const walletEntry = authEntries.find(e => {
           if (e.credentials().switch().name !== "sorobanCredentialsAddress") return false;
           return Address.fromScAddress(e.credentials().address().address()).toString() === wallet.contractId;
         });
         if (!walletEntry) throw new Error("No auth entry found for wallet");
 
-        // Set expiration and AuthPayload on the wallet entry
         walletEntry.credentials().address().signatureExpirationLedger(expiration);
 
         const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, walletEntry, expiration);
         const authDigest = buildAuthDigest(sigPayload, [selectedRuleId]);
 
-        // Build the AuthPayload with context_rule_ids + empty signer bytes
-        // (Delegated signers prove identity via their own auth entry, not inline sig)
-        const delegatedScVal = xdr.ScVal.scvVec([
-          xdr.ScVal.scvSymbol("Delegated"),
-          xdr.ScVal.scvAddress(Address.fromString(ephemeralKeypair.publicKey()).toScAddress()),
-        ]);
-        walletEntry.credentials().address().signature(xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("context_rule_ids"),
-            val: xdr.ScVal.scvVec([xdr.ScVal.scvU32(selectedRuleId)]),
-          }),
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("signers"),
-            val: xdr.ScVal.scvMap([
-              new xdr.ScMapEntry({
-                key: delegatedScVal,
-                val: xdr.ScVal.scvBytes(Buffer.alloc(0)),
-              }),
-            ]),
-          }),
-        ]));
+        // ed25519 sign the auth_digest directly — the verifier contract
+        // calls e.crypto().ed25519_verify(pubkey, auth_digest, signature)
+        const ed25519Sig = ephemeralKeypair.sign(Buffer.from(authDigest));
 
-        // Build the Delegated signer's auth entry for __check_auth(auth_digest)
-        // The wallet calls addr.require_auth_for_args((auth_digest,)) for each
-        // Delegated signer. This requires a standard Soroban address auth entry
-        // with a real ed25519 signature.
-        const delegatedNonce = xdr.Int64.fromString(Date.now().toString());
-        const delegatedInvocation = new xdr.SorobanAuthorizedInvocation({
-          function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
-            new xdr.InvokeContractArgs({
-              contractAddress: Address.fromString(wallet.contractId).toScAddress(),
-              functionName: "__check_auth",
-              args: [xdr.ScVal.scvBytes(authDigest)],
-            })
-          ),
-          subInvocations: [],
-        });
-
-        // Sign with the ephemeral keypair using standard Soroban address auth format
-        const delegatedPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-          new xdr.HashIdPreimageSorobanAuthorization({
-            networkId,
-            nonce: delegatedNonce,
-            signatureExpirationLedger: expiration,
-            invocation: delegatedInvocation,
-          })
+        // Build AuthPayload with External signer, same pattern as the passkey
+        const rawPubkey = ephemeralKeypair.rawPublicKey();
+        const signer = {
+          tag: "External" as const,
+          values: [TESTNET_ED25519_VERIFIER, Buffer.from(rawPubkey)] as const,
+        };
+        walletEntry.credentials().address().signature(
+          writeAuthPayload([selectedRuleId], signer, Buffer.from(ed25519Sig))
         );
-        const delegatedSig = ephemeralKeypair.sign(hash(delegatedPreimage.toXDR()));
 
-        const delegatedAuthEntry = new xdr.SorobanAuthorizationEntry({
-          credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-            new xdr.SorobanAddressCredentials({
-              address: Address.fromString(ephemeralKeypair.publicKey()).toScAddress(),
-              nonce: delegatedNonce,
-              signatureExpirationLedger: expiration,
-              signature: xdr.ScVal.scvVec([
-                xdr.ScVal.scvMap([
-                  new xdr.ScMapEntry({
-                    key: xdr.ScVal.scvSymbol("public_key"),
-                    val: xdr.ScVal.scvBytes(ephemeralKeypair.rawPublicKey()),
-                  }),
-                  new xdr.ScMapEntry({
-                    key: xdr.ScVal.scvSymbol("signature"),
-                    val: xdr.ScVal.scvBytes(delegatedSig),
-                  }),
-                ]),
-              ]),
-            })
-          ),
-          rootInvocation: delegatedInvocation,
-        });
-
-        signedAuthEntries = [walletEntry, delegatedAuthEntry];
+        signedAuthEntries = [walletEntry];
       } else {
         // --- Default: passkey signing ---
         setStatus("Sign with your passkey...");

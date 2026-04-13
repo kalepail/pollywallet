@@ -219,7 +219,8 @@ export const buildAddContextRuleTx = createServerFn({ method: "POST" })
     const { walletContractId, targetContractAddress, policyAddress, installParamsXdr, ephemeralSignerPublicKey, ruleName } = data;
 
     try {
-      const { Address, xdr, nativeToScVal } = await import("@stellar/stellar-sdk");
+      const { Address, StrKey, xdr, nativeToScVal } = await import("@stellar/stellar-sdk");
+      const { TESTNET_ED25519_VERIFIER } = await import("./passkey");
 
       // context_type: CallContract(targetContractAddress)
       const contextType = xdr.ScVal.scvVec([
@@ -227,11 +228,15 @@ export const buildAddContextRuleTx = createServerFn({ method: "POST" })
         xdr.ScVal.scvAddress(Address.fromString(targetContractAddress).toScAddress()),
       ]);
 
-      // signers: [Delegated(ephemeralSignerPublicKey)]
+      // signers: [External(ed25519_verifier, raw_public_key)]
+      // Uses External signer with an ed25519 verifier contract instead of Delegated,
+      // so the ephemeral keypair doesn't need to exist as a funded Stellar account.
+      const rawPubkey = StrKey.decodeEd25519PublicKey(ephemeralSignerPublicKey);
       const signers = xdr.ScVal.scvVec([
         xdr.ScVal.scvVec([
-          xdr.ScVal.scvSymbol("Delegated"),
-          xdr.ScVal.scvAddress(Address.fromString(ephemeralSignerPublicKey).toScAddress()),
+          xdr.ScVal.scvSymbol("External"),
+          xdr.ScVal.scvAddress(Address.fromString(TESTNET_ED25519_VERIFIER).toScAddress()),
+          xdr.ScVal.scvBytes(Buffer.from(rawPubkey)),
         ]),
       ]);
 

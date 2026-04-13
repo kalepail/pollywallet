@@ -7,8 +7,10 @@ export interface ContextRuleInfo {
   name: string;
   contextType: "Default" | "CallContract" | "CreateContract";
   targetContract?: string;
-  signers: Array<{ type: "Delegated" | "External"; address: string }>;
+  signers: Array<{ type: "Delegated" | "External"; address: string; keyData?: Uint8Array }>;
+  signerIds: number[];
   policies: string[];
+  policyIds: number[];
   validUntil?: number;
 }
 
@@ -60,7 +62,10 @@ export async function requestContextRules(walletContractId: string): Promise<{
 
     const rules: ContextRuleInfo[] = [];
 
-    for (let id = 0; id < ruleCount; id++) {
+    // Rule IDs are monotonically incrementing and never reused after deletion,
+    // so there can be gaps. Scan until we've found all `ruleCount` active rules.
+    const maxScan = ruleCount * 5; // generous upper bound to handle sparse IDs
+    for (let id = 0; rules.length < ruleCount && id < maxScan; id++) {
       try {
         const rule = await simulateCall("get_context_rule", [nativeToScVal(id, { type: "u32" })]);
         if (!rule) continue;
@@ -80,10 +85,14 @@ export async function requestContextRules(walletContractId: string): Promise<{
 
         const signers = (rule.signers ?? []).map((s: any) => {
           if (Array.isArray(s)) {
-            const [tag, addr] = s;
+            const [tag, addr, keyData] = s;
             return {
               type: tag as "Delegated" | "External",
               address: typeof addr === "string" ? addr : "",
+              keyData: keyData instanceof Uint8Array ? keyData
+                : (keyData?.type === "Buffer" && Array.isArray(keyData.data))
+                  ? new Uint8Array(keyData.data)
+                  : undefined,
             };
           }
           return { type: "Delegated" as const, address: "" };
@@ -93,13 +102,18 @@ export async function requestContextRules(walletContractId: string): Promise<{
           typeof p === "string" ? p : ""
         ).filter(Boolean);
 
+        const signerIds = (rule.signer_ids ?? []).map((id: any) => Number(id));
+        const policyIds = (rule.policy_ids ?? []).map((id: any) => Number(id));
+
         rules.push({
           id: typeof rule.id === "number" ? rule.id : Number(rule.id ?? id),
           name: rule.name ?? `Rule ${id}`,
           contextType,
           targetContract,
           signers,
+          signerIds,
           policies,
+          policyIds,
           validUntil: rule.valid_until != null ? Number(rule.valid_until) : undefined,
         });
       } catch {

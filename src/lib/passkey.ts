@@ -20,11 +20,16 @@ const SECP256R1_ORDER = BigInt(
 );
 
 // --- Testnet contract addresses ---
-export { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
+// Import + re-export (not `export { } from`) so these are available as local
+// bindings within this module (e.g. as default parameter values).
+import { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
+export { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE };
 export const TESTNET_ACCOUNT_WASM_HASH =
   "8537b8166c0078440a5324c12f6db48d6340d157c306a54c5ea81405abcc2611";
 export const TESTNET_WEBAUTHN_VERIFIER =
   "CCMR63YE5T7MPWREF3PC5XNTTGXFSB4GYUGUIT5POHP2UGCS65TBIUUU";
+export const TESTNET_ED25519_VERIFIER =
+  "CCINZKKTMDWH2RNUVQOIZP2S2TIQR73VZYU7G6M5ZW64UTJCPYMDHKO4";
 export const TESTNET_NATIVE_TOKEN_CONTRACT =
   "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 export const FRIENDBOT_URL = "https://friendbot.stellar.org";
@@ -244,6 +249,57 @@ export function signKeypairAuthEntries(
 
     return entry;
   });
+}
+
+// --- High-level Signing ---
+
+/**
+ * Sign all wallet auth entries with a passkey for a given set of context rule IDs.
+ * Reusable across management operations (rename, delete, etc.) and policy installs.
+ *
+ * Iterates auth entries, finds the one belonging to the wallet contract,
+ * signs it via WebAuthn, and writes the auth payload. Non-wallet entries are
+ * passed through unchanged.
+ */
+export async function signWalletAuthEntries(params: {
+  authEntries: xdr.SorobanAuthorizationEntry[];
+  wallet: { contractId: string; credentialId: string; publicKey: string };
+  contextRuleIds: number[];
+  expiration: number;
+  networkPassphrase?: string;
+}): Promise<xdr.SorobanAuthorizationEntry[]> {
+  const {
+    authEntries,
+    wallet,
+    contextRuleIds,
+    expiration,
+    networkPassphrase = TESTNET_NETWORK_PASSPHRASE,
+  } = params;
+
+  const keyData = buildKeyData(Buffer.from(wallet.publicKey, "hex"), wallet.credentialId);
+  const signer = {
+    tag: "External" as const,
+    values: [TESTNET_WEBAUTHN_VERIFIER, keyData] as const,
+  };
+
+  const signed: xdr.SorobanAuthorizationEntry[] = [];
+  for (const entry of authEntries) {
+    const credType = entry.credentials().switch().name;
+    if (credType === "sorobanCredentialsAddress") {
+      const credentials = entry.credentials().address();
+      credentials.signatureExpirationLedger(expiration);
+      if (Address.fromScAddress(credentials.address()).toString() === wallet.contractId) {
+        const sigPayload = buildSignaturePayload(networkPassphrase, entry, expiration);
+        const authDigest = buildAuthDigest(sigPayload, contextRuleIds);
+        const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
+        credentials.signature(
+          writeAuthPayload(contextRuleIds, signer, buildWebAuthnSigBytes(webAuthnResult))
+        );
+      }
+    }
+    signed.push(entry);
+  }
+  return signed;
 }
 
 // --- Key Data / Contract Address ---
