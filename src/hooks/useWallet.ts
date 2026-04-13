@@ -313,7 +313,7 @@ export function useWallet() {
       if (ephemeralSigner) {
         if (ephemeralSigner.type === "External" && ephemeralSigner.keyData) {
           // External signer: derive G-address from raw public key to look up the stored secret
-          const gAddr = Keypair.fromRawEd25519PublicKey(Buffer.from(ephemeralSigner.keyData)).publicKey();
+          const gAddr = StrKey.encodeEd25519PublicKey(Buffer.from(ephemeralSigner.keyData));
           ephemeralSecret = loadEphemeralSigners()[gAddr] ?? null;
         } else {
           ephemeralSecret = loadEphemeralSigners()[ephemeralSigner.address] ?? null;
