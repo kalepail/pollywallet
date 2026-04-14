@@ -1,193 +1,211 @@
-Welcome to your new TanStack Start app! 
+# PollyWallet
 
-# Getting Started
+PollyWallet is a passkey-secured smart wallet demo built on Stellar testnet. It uses WebAuthn passkeys for user authorization, deploys an OpenZeppelin smart account contract per wallet, funds accounts through Friendbot, and submits Soroban transactions through an OpenZeppelin Channels relayer.
 
-To run this application:
+This repository is a testnet-focused application, not a production wallet. Several implementation choices are intentionally convenient for a demo and should be treated as unsafe for mainnet use.
 
-```bash
-npm install
-npm run dev
+## What It Does
+
+- Creates a passkey-backed wallet in the browser.
+- Derives and deploys a Stellar smart account contract for that passkey.
+- Stores wallet metadata locally in the browser.
+- Funds the wallet with testnet XLM via Friendbot.
+- Sends XLM using passkey authorization and a relayer-backed submission flow.
+
+## Stack
+
+- TanStack Start + React 19
+- Cloudflare Vite plugin / Wrangler deployment target
+- Stellar Soroban SDK
+- OpenZeppelin Channels relayer client
+- SimpleWebAuthn for browser passkeys
+- Tailwind CSS 4
+- Vitest for unit tests
+
+## Repository Layout
+
+```text
+.
+├── bindings/multisig-account/   Generated TypeScript bindings for the smart account contract
+├── public/                      Static assets
+├── scripts/                     E2E helpers for agent-browser + WebAuthn flows
+├── src/
+│   ├── components/              UI shell components
+│   ├── hooks/                   Wallet orchestration
+│   ├── lib/                     Passkey, Soroban, and relayer helpers
+│   └── routes/                  TanStack file routes
+├── stellar-contracts/           Optional git submodule for upstream OpenZeppelin Stellar contracts
+├── wrangler.jsonc               Cloudflare runtime config
+└── worker-configuration.d.ts    Generated Wrangler type definitions
 ```
 
-# Building For Production
+## Prerequisites
 
-To build this application for production:
+- A recent Node.js version
+- `pnpm`
+- A browser/device that supports WebAuthn passkeys
+- An OpenZeppelin Channels API key for the deploy, fund, and transfer flows
+
+## Getting Started
+
+Clone the repository and install dependencies:
 
 ```bash
-npm run build
+git clone <your-fork-or-repo-url>
+cd pollywallet
+pnpm install
 ```
+
+If you also want the upstream contract sources referenced by the submodule:
+
+```bash
+git submodule update --init --recursive
+```
+
+Create a local worker env file for the relayer secret:
+
+```bash
+cat > .dev.vars <<'EOF'
+CHANNELS_API_KEY=your_openzeppelin_channels_api_key
+EOF
+```
+
+`CHANNELS_BASE_URL` defaults to the OpenZeppelin testnet endpoint and is already set in [wrangler.jsonc](./wrangler.jsonc). You only need to override it if you are targeting a different relayer base URL.
+
+Start the app:
+
+```bash
+pnpm dev
+```
+
+The default dev URL is `http://localhost:3000`.
+
+## Available Scripts
+
+```bash
+pnpm dev         # run the local dev server
+pnpm build       # build the bindings package, then the app
+pnpm preview     # build and serve the production bundle locally
+pnpm test        # run Vitest
+pnpm test:e2e    # run the browser-based WebAuthn E2E flow
+pnpm deploy      # build and deploy with Wrangler
+pnpm cf-typegen  # regenerate Cloudflare environment/runtime types
+```
+
+## How The Wallet Flow Works
+
+### 1. Passkey creation
+
+The client creates a WebAuthn credential and extracts the P-256 public key. That public key and credential ID become the signer identity for the smart account.
+
+### 2. Contract address derivation
+
+The app derives a deterministic contract address from:
+
+- the deployer public key
+- the Stellar testnet network passphrase
+- a salt derived from the credential ID
+
+### 3. Deploy via server function
+
+The browser builds an unsigned deployment transaction, then sends it to a TanStack server function. The server function reconstructs the deployer keypair, simulates the transaction, signs it, and submits it through the Channels relayer.
+
+### 4. Funding
+
+To fund a wallet, the app creates a temporary Stellar account, requests testnet XLM from Friendbot, and relays a Soroban token transfer into the smart wallet contract.
+
+### 5. Transfers
+
+For outgoing transfers, the app simulates the Soroban call, signs the authorization payload with the user’s passkey, encodes the WebAuthn signature into the required Soroban auth payload, and submits the transaction through the relayer.
+
+## Environment And Runtime Notes
+
+- `CHANNELS_API_KEY` is required for the deploy, fund, and transfer flows.
+- `CHANNELS_BASE_URL` defaults to `https://channels.openzeppelin.com/testnet`.
+- Wallet metadata is stored in browser `localStorage` under `pollywallet:wallet`.
+- The app is hard-coded to Stellar testnet.
+- `worker-configuration.d.ts` is generated output from Wrangler and can be refreshed with `pnpm cf-typegen`.
 
 ## Testing
 
-This project uses [Vitest](https://vitest.dev/) for testing. You can run the tests with:
+### Unit tests
 
 ```bash
-npm run test
+pnpm test
 ```
 
-## Styling
+Vitest runs in `jsdom`.
 
-This project uses [Tailwind CSS](https://tailwindcss.com/) for styling.
+### Browser E2E flow
 
-### Removing Tailwind CSS
-
-If you prefer not to use Tailwind CSS:
-
-1. Remove the demo pages in `src/routes/demo/`
-2. Replace the Tailwind import in `src/styles.css` with your own styles
-3. Remove `tailwindcss()` from the plugins array in `vite.config.ts`
-4. Uninstall the packages: `npm install @tailwindcss/vite tailwindcss -D`
-
-
-
-## Routing
-
-This project uses [TanStack Router](https://tanstack.com/router) with file-based routing. Routes are managed as files in `src/routes`.
-
-### Adding A Route
-
-To add a new route to your application just add a new file in the `./src/routes` directory.
-
-TanStack will automatically generate the content of the route file for you.
-
-Now that you have two routes you can use a `Link` component to navigate between them.
-
-### Adding Links
-
-To use SPA (Single Page Application) navigation you will need to import the `Link` component from `@tanstack/react-router`.
-
-```tsx
-import { Link } from "@tanstack/react-router";
+```bash
+pnpm test:e2e
 ```
 
-Then anywhere in your JSX you can use it like so:
+The E2E path depends on:
 
-```tsx
-<Link to="/about">About</Link>
+- `agent-browser`
+- a local PollyWallet dev server
+- virtual WebAuthn support through `scripts/agent-browser-webauthn-helper.mjs`
+
+The default test target is `http://localhost:3000`, and the script exercises create, fund, and transfer in one session.
+
+## Deployment
+
+Deployments target Cloudflare through Wrangler:
+
+```bash
+pnpm deploy
 ```
 
-This will create a link that will navigate to the `/about` route.
+Before deploying, make sure the relevant Worker secret is configured for the target environment. For local development this is typically `.dev.vars`; for deployed environments use Wrangler secrets or environment configuration appropriate to your setup.
 
-More information on the `Link` component can be found in the [Link documentation](https://tanstack.com/router/v1/docs/framework/react/api/router/linkComponent).
+## Security Caveats
 
-### Using A Layout
+This repository should be treated as a demo/prototype.
 
-In the File Based Routing setup the layout is located in `src/routes/__root.tsx`. Anything you add to the root route will appear in all the routes. The route content will appear in the JSX where you render `{children}` in the `shellComponent`.
+- The app is testnet-only.
+- The relayer server functions do not currently authenticate callers.
+- The deployer key is derived from a deterministic seed for convenience.
+- Friendbot funding is used as part of the flow.
+- Wallet state is stored in browser `localStorage`.
 
-Here is an example layout that includes a header:
+If you intend to harden this project for production, start with:
 
-```tsx
-import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
+1. Replacing the deterministic deployer seed with a real secret.
+2. Adding auth and rate limiting to the relayer-backed server functions.
+3. Reviewing transaction authorization boundaries and abuse paths.
+4. Reworking client-side persistence and account recovery expectations.
 
-export const Route = createRootRoute({
-  head: () => ({
-    meta: [
-      { charSet: 'utf-8' },
-      { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { title: 'My App' },
-    ],
-  }),
-  shellComponent: ({ children }) => (
-    <html lang="en">
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        <header>
-          <nav>
-            <Link to="/">Home</Link>
-            <Link to="/about">About</Link>
-          </nav>
-        </header>
-        {children}
-        <Scripts />
-      </body>
-    </html>
-  ),
-})
-```
+## Troubleshooting
 
-More information on layouts can be found in the [Layouts documentation](https://tanstack.com/router/latest/docs/framework/react/guide/routing-concepts#layouts).
+### `Relayer not configured`
 
-## Server Functions
+Set `CHANNELS_API_KEY` in `.dev.vars` before running `pnpm dev`.
 
-TanStack Start provides server functions that allow you to write server-side code that seamlessly integrates with your client components.
+### Wallet creation fails during deployment
 
-```tsx
-import { createServerFn } from '@tanstack/react-start'
+Check that:
 
-const getServerTime = createServerFn({
-  method: 'GET',
-}).handler(async () => {
-  return new Date().toISOString()
-})
+- the relayer key is valid
+- the relayer base URL points to a compatible environment
+- the testnet RPC endpoint is reachable
 
-// Use in a component
-function MyComponent() {
-  const [time, setTime] = useState('')
-  
-  useEffect(() => {
-    getServerTime().then(setTime)
-  }, [])
-  
-  return <div>Server time: {time}</div>
-}
-```
+### Funding fails
 
-## API Routes
+Friendbot or the testnet RPC may be unavailable temporarily. Retry after a short delay.
 
-You can create API routes by using the `server` property in your route definitions:
+### Passkey prompts do not appear
 
-```tsx
-import { createFileRoute } from '@tanstack/react-router'
-import { json } from '@tanstack/react-start'
+Use a browser and platform with WebAuthn/passkey support enabled. Some automated or remote browser environments require special setup.
 
-export const Route = createFileRoute('/api/hello')({
-  server: {
-    handlers: {
-      GET: () => json({ message: 'Hello, World!' }),
-    },
-  },
-})
-```
+## Development Notes
 
-## Data Fetching
+- The generated contract bindings live in [bindings/multisig-account](./bindings/multisig-account).
+- The project is a `pnpm` workspace rooted at the repository root.
+- `package.json` is marked `"private": true`, so publishing the repository does not publish the package.
+- The `stellar-contracts` directory is present as a submodule path but may be empty until initialized.
 
-There are multiple ways to fetch data in your application. You can use TanStack Query to fetch data from a server. But you can also use the `loader` functionality built into TanStack Router to load the data for a route before it's rendered.
+## License
 
-For example:
-
-```tsx
-import { createFileRoute } from '@tanstack/react-router'
-
-export const Route = createFileRoute('/people')({
-  loader: async () => {
-    const response = await fetch('https://swapi.dev/api/people')
-    return response.json()
-  },
-  component: PeopleComponent,
-})
-
-function PeopleComponent() {
-  const data = Route.useLoaderData()
-  return (
-    <ul>
-      {data.results.map((person) => (
-        <li key={person.name}>{person.name}</li>
-      ))}
-    </ul>
-  )
-}
-```
-
-Loaders simplify your data fetching logic dramatically. Check out more information in the [Loader documentation](https://tanstack.com/router/latest/docs/framework/react/guide/data-loading#loader-parameters).
-
-# Demo files
-
-Files prefixed with `demo` can be safely deleted. They are there to provide a starting point for you to play around with the features you've installed.
-
-# Learn More
-
-You can learn more about all of the offerings from TanStack in the [TanStack documentation](https://tanstack.com).
-
-For TanStack Start specific documentation, visit [TanStack Start](https://tanstack.com/start).
+This project is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).
