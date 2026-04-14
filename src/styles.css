@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@cloudflare/kumo/styles";
 
 body {
   @apply m-0;

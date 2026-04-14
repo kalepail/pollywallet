@@ -1,16 +1,33 @@
 import { Link } from "@tanstack/react-router";
-import { Wallet } from "lucide-react";
+import { Wallet, ShieldCheck, ListBullets } from "@phosphor-icons/react";
+import { Badge } from "@cloudflare/kumo/components/badge";
 
 export default function Header() {
   return (
     <header className="px-6 py-4 flex items-center bg-slate-900 border-b border-slate-800 text-white">
       <Link to="/" className="flex items-center gap-3">
-        <Wallet className="w-6 h-6 text-cyan-400" />
+        <Wallet size={24} weight="bold" className="text-cyan-400" />
         <span className="text-xl font-bold tracking-tight">PollyWallet</span>
       </Link>
-      <span className="ml-3 text-xs bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded-full font-medium">
-        Testnet
+      <span className="ml-3">
+        <Badge variant="teal">Testnet</Badge>
       </span>
+      <nav className="ml-auto flex items-center gap-4">
+        <Link
+          to="/rules"
+          className="flex items-center gap-2 text-sm text-gray-400 hover:text-cyan-400 transition-colors"
+        >
+          <ListBullets size={16} weight="bold" />
+          Rules
+        </Link>
+        <Link
+          to="/policies"
+          className="flex items-center gap-2 text-sm text-gray-400 hover:text-violet-400 transition-colors"
+        >
+          <ShieldCheck size={16} weight="bold" />
+          Policies
+        </Link>
+      </nav>
     </header>
   );
 }

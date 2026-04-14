@@ -16,5 +16,20 @@
 	"upload_source_maps": true,
 	"vars": {
 		"CHANNELS_BASE_URL": "https://channels.openzeppelin.com/testnet"
-	}
+	},
+	"services": [
+		{
+			"binding": "SANDBOX",
+			"service": "pollywallet-sandbox"
+		}
+	],
+	"ai": {
+		"binding": "AI"
+	},
+	"kv_namespaces": [
+		{
+			"binding": "POLICIES_KV",
+			"id": "377a3fc3958b408c8151205b6f96d73f"
+		}
+	]
 }

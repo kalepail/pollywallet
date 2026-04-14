@@ -13,7 +13,8 @@ import {
   scValToNative,
 } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
-import { submitToRelayer, signAndSubmitDeploy } from "../lib/relayer";
+import { signAndSubmitDeploy } from "../lib/relayer";
+import { requestSubmitToRelayer } from "../lib/policy-deploy";
 import {
   createPasskey,
   signWithPasskey,
@@ -33,6 +34,7 @@ import {
   TESTNET_NETWORK_PASSPHRASE,
   TESTNET_ACCOUNT_WASM_HASH,
   TESTNET_WEBAUTHN_VERIFIER,
+  TESTNET_ED25519_VERIFIER,
   TESTNET_NATIVE_TOKEN_CONTRACT,
   FRIENDBOT_URL,
   DEPLOYER_PUBLIC_KEY,
@@ -40,12 +42,28 @@ import {
   STROOPS_PER_XLM,
 } from "../lib/passkey";
 import type { StoredWallet } from "../lib/passkey";
+import { requestContextRules, type ContextRuleInfo } from "../lib/context-rules";
 
 const BASE_FEE = "1000000";
 const server = new rpc.Server(TESTNET_RPC_URL);
 
 /** Friendbot gives 10,000 XLM. Reserve 5 XLM in the temp account for the transfer fee + base reserve. */
 const FRIENDBOT_TRANSFER_XLM = 9_995n;
+
+/** Key for persisting ephemeral signer secrets in localStorage. */
+const EPHEMERAL_SIGNERS_KEY = "pollywallet:ephemeral-signers";
+
+function loadEphemeralSigners(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(EPHEMERAL_SIGNERS_KEY) || "{}");
+  } catch { return {}; }
+}
+
+function saveEphemeralSigner(publicKey: string, secret: string) {
+  const signers = loadEphemeralSigners();
+  signers[publicKey] = secret;
+  localStorage.setItem(EPHEMERAL_SIGNERS_KEY, JSON.stringify(signers));
+}
 
 export function useWallet() {
   const [wallet, setWallet] = useState<StoredWallet | null>(null);
@@ -55,11 +73,30 @@ export function useWallet() {
   const [copied, setCopied] = useState(false);
   const [destination, setDestination] = useState("");
   const [amount, setAmount] = useState("");
+  const [contextRules, setContextRules] = useState<ContextRuleInfo[]>([]);
+  const [selectedRuleId, setSelectedRuleId] = useState<number>(0);
+  const [rulesLoading, setRulesLoading] = useState(false);
 
   useEffect(() => {
     const stored = loadWallet();
     if (stored) setWallet(stored);
   }, []);
+
+  // Fetch context rules when wallet is available
+  const fetchRules = useCallback(async (contractId: string) => {
+    setRulesLoading(true);
+    try {
+      const result = await requestContextRules(contractId);
+      if (result.success) {
+        setContextRules(result.rules);
+      }
+    } catch { /* best effort */ }
+    finally { setRulesLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (wallet) fetchRules(wallet.contractId);
+  }, [wallet, fetchRules]);
 
   const fetchBalance = useCallback(async (contractId: string) => {
     try {
@@ -186,11 +223,9 @@ export function useWallet() {
         simSuccess.latestLedger + LEDGERS_PER_HOUR, TESTNET_NETWORK_PASSPHRASE
       );
 
-      const relayerResult = await submitToRelayer({
-        data: {
-          func: hostFunc.toXDR("base64"),
-          auth: signedAuth.map((e) => e.toXDR("base64")),
-        },
+      const relayerResult = await requestSubmitToRelayer({
+        func: hostFunc.toXDR("base64"),
+        auth: signedAuth.map((e) => e.toXDR("base64")),
       });
       if (!relayerResult.success) throw new Error(relayerResult.error || "Fund via relayer failed");
 
@@ -229,72 +264,160 @@ export function useWallet() {
       const keyData = buildKeyData(Buffer.from(wallet.publicKey, "hex"), wallet.credentialId);
       const signer = { tag: "External" as const, values: [TESTNET_WEBAUTHN_VERIFIER, keyData] as const };
 
-      // Smart account calls SAC.transfer via execute()
-      const executeHostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
-        new xdr.InvokeContractArgs({
-          contractAddress: Address.fromString(wallet.contractId).toScAddress(),
-          functionName: "execute",
-          args: [
-            xdr.ScVal.scvAddress(Address.fromString(TESTNET_NATIVE_TOKEN_CONTRACT).toScAddress()),
-            xdr.ScVal.scvSymbol("transfer"),
-            xdr.ScVal.scvVec([
+      // Determine the selected context rule
+      const selectedRule = contextRules.find(r => r.id === selectedRuleId);
+      const usingPolicyRule = selectedRule && selectedRule.policies.length > 0;
+
+      // Build the host function based on context rule type:
+      // - Default rule: wallet.execute(target, fn, args) — passkey signs the execute call
+      // - CallContract rule: SAC.transfer(wallet, dest, amount) — direct call triggers
+      //   wallet's __check_auth with Context::Contract(SAC, "transfer", ...) which
+      //   matches the CallContract(SAC) context rule and runs the policy's enforce()
+      let hostFunc: xdr.HostFunction;
+      if (usingPolicyRule && selectedRule?.contextType === "CallContract") {
+        // Direct SAC transfer — the wallet's __check_auth is triggered by
+        // SAC calling require_auth(wallet) inside transfer()
+        hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
+          new xdr.InvokeContractArgs({
+            contractAddress: Address.fromString(TESTNET_NATIVE_TOKEN_CONTRACT).toScAddress(),
+            functionName: "transfer",
+            args: [
               xdr.ScVal.scvAddress(Address.fromString(wallet.contractId).toScAddress()),
               xdr.ScVal.scvAddress(Address.fromString(destination).toScAddress()),
               toI128(amountStroops),
-            ]),
-          ],
-        })
-      );
+            ],
+          })
+        );
+      } else {
+        // Default: wallet.execute() wrapper
+        hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
+          new xdr.InvokeContractArgs({
+            contractAddress: Address.fromString(wallet.contractId).toScAddress(),
+            functionName: "execute",
+            args: [
+              xdr.ScVal.scvAddress(Address.fromString(TESTNET_NATIVE_TOKEN_CONTRACT).toScAddress()),
+              xdr.ScVal.scvSymbol("transfer"),
+              xdr.ScVal.scvVec([
+                xdr.ScVal.scvAddress(Address.fromString(wallet.contractId).toScAddress()),
+                xdr.ScVal.scvAddress(Address.fromString(destination).toScAddress()),
+                toI128(amountStroops),
+              ]),
+            ],
+          })
+        );
+      }
 
+      // Find the ephemeral signer — supports both External (ed25519 verifier) and legacy Delegated signers.
+      const ephemeralSigner = selectedRule?.signers.find(s => s.type === "External" || s.type === "Delegated");
+      let ephemeralSecret: string | null = null;
+      if (ephemeralSigner) {
+        if (ephemeralSigner.type === "External" && ephemeralSigner.keyData) {
+          // External signer: derive G-address from raw public key to look up the stored secret
+          const gAddr = StrKey.encodeEd25519PublicKey(Buffer.from(ephemeralSigner.keyData));
+          ephemeralSecret = loadEphemeralSigners()[gAddr] ?? null;
+        } else {
+          ephemeralSecret = loadEphemeralSigners()[ephemeralSigner.address] ?? null;
+        }
+      }
+
+      if (usingPolicyRule && !ephemeralSecret) {
+        throw new Error("No stored secret for ephemeral signer — reinstall the policy to generate a new key.");
+      }
+
+      // --- Pass 1: Simulate to get auth entries ---
       setStatus("Simulating transfer...");
-      const simAccount = new Account(Keypair.random().publicKey(), "0");
+
+      // Use the deployer account (always funded) as simulation source.
+      // Policy transfers need a real account with a valid sequence number.
+      const simAccount = usingPolicyRule
+        ? await server.getAccount(DEPLOYER_PUBLIC_KEY)
+        : new Account(Keypair.random().publicKey(), "0");
       const simTx = new TransactionBuilder(simAccount, {
         fee: BASE_FEE,
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
       })
-        .addOperation(Operation.invokeHostFunction({ func: executeHostFunc, auth: [] }))
+        .addOperation(Operation.invokeHostFunction({ func: hostFunc, auth: [] }))
         .setTimeout(30)
         .build();
 
       const simResult = await server.simulateTransaction(simTx);
       if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
       const simSuccess = simResult as rpc.Api.SimulateTransactionSuccessResponse;
-
       const authEntries = simSuccess.result?.auth ?? [];
       const expiration = simSuccess.latestLedger + LEDGERS_PER_HOUR;
 
-      setStatus("Sign with your passkey...");
+      let signedAuthEntries: xdr.SorobanAuthorizationEntry[];
 
-      const signedAuthEntries: xdr.SorobanAuthorizationEntry[] = [];
-      for (const entry of authEntries) {
-        const credType = entry.credentials().switch().name;
+      if (usingPolicyRule && ephemeralSecret) {
+        // --- Policy-enforced: External signer with ed25519 verifier ---
+        // Signs the auth_digest directly with the ephemeral ed25519 key.
+        // The signature goes inline in the wallet's AuthPayload — no separate
+        // auth entry needed (unlike Delegated signers which require the account
+        // to exist on the ledger for require_auth_for_args).
+        setStatus("Signing with ephemeral key...");
+        const ephemeralKeypair = Keypair.fromSecret(ephemeralSecret);
 
-        if (credType === "sorobanCredentialsAddress") {
-          const credentials = entry.credentials().address();
-          credentials.signatureExpirationLedger(expiration);
+        const walletEntry = authEntries.find(e => {
+          if (e.credentials().switch().name !== "sorobanCredentialsAddress") return false;
+          return Address.fromScAddress(e.credentials().address().address()).toString() === wallet.contractId;
+        });
+        if (!walletEntry) throw new Error("No auth entry found for wallet");
 
-          if (Address.fromScAddress(credentials.address()).toString() === wallet.contractId) {
-            const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, entry, expiration);
-            const authDigest = buildAuthDigest(sigPayload, [0]);
-            const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
-            credentials.signature(
-              writeAuthPayload([0], signer, buildWebAuthnSigBytes(webAuthnResult))
-            );
+        walletEntry.credentials().address().signatureExpirationLedger(expiration);
+
+        const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, walletEntry, expiration);
+        const authDigest = buildAuthDigest(sigPayload, [selectedRuleId]);
+
+        // ed25519 sign the auth_digest directly — the verifier contract
+        // calls e.crypto().ed25519_verify(pubkey, auth_digest, signature)
+        const ed25519Sig = ephemeralKeypair.sign(Buffer.from(authDigest));
+
+        // Build AuthPayload with External signer, same pattern as the passkey
+        const rawPubkey = ephemeralKeypair.rawPublicKey();
+        const signer = {
+          tag: "External" as const,
+          values: [TESTNET_ED25519_VERIFIER, Buffer.from(rawPubkey)] as const,
+        };
+        walletEntry.credentials().address().signature(
+          writeAuthPayload([selectedRuleId], signer, Buffer.from(ed25519Sig))
+        );
+
+        signedAuthEntries = [walletEntry];
+      } else {
+        // --- Default: passkey signing ---
+        setStatus("Sign with your passkey...");
+        signedAuthEntries = [];
+        for (const entry of authEntries) {
+          const credType = entry.credentials().switch().name;
+          if (credType === "sorobanCredentialsAddress") {
+            const credentials = entry.credentials().address();
+            credentials.signatureExpirationLedger(expiration);
+            if (Address.fromScAddress(credentials.address()).toString() === wallet.contractId) {
+              const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, entry, expiration);
+              const authDigest = buildAuthDigest(sigPayload, [selectedRuleId]);
+              const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
+              credentials.signature(
+                writeAuthPayload([selectedRuleId], signer, buildWebAuthnSigBytes(webAuthnResult))
+              );
+            }
           }
-          signedAuthEntries.push(entry);
-        } else {
           signedAuthEntries.push(entry);
         }
       }
 
       setStatus("Submitting via relayer...");
 
-      const relayerResult = await submitToRelayer({
-        data: {
-          func: executeHostFunc.toXDR("base64"),
-          auth: signedAuthEntries.map((e) => e.toXDR("base64")),
-        },
-      });
+      // Serialize for relayer — catch serialization errors separately
+      let funcXdr: string;
+      let authXdr: string[];
+      try {
+        funcXdr = hostFunc.toXDR("base64");
+        authXdr = signedAuthEntries.map((e) => e.toXDR("base64"));
+      } catch (serErr: any) {
+        throw new Error(`Failed to serialize auth entries: ${serErr.message}`);
+      }
+
+      const relayerResult = await requestSubmitToRelayer({ func: funcXdr, auth: authXdr });
       if (!relayerResult.success) throw new Error(relayerResult.error || "Relayer failed");
 
       if (relayerResult.hash) {
@@ -329,8 +452,10 @@ export function useWallet() {
 
   return {
     wallet, balance, status, loading, copied, destination, amount,
-    setDestination, setAmount,
+    contextRules, selectedRuleId, rulesLoading,
+    setDestination, setAmount, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
+    fetchRules, saveEphemeralSigner,
   };
 }
 

@@ -28,7 +28,13 @@ export default defineConfig({
   },
   ssr: {
     optimizeDeps: {
-      include: ['@openzeppelin/relayer-plugin-channels'],
+      include: [
+        '@openzeppelin/relayer-plugin-channels',
+        '@stellar/stellar-sdk',
+        '@stellar/stellar-sdk/rpc',
+        '@stellar/stellar-sdk/contract',
+        'buffer',
+      ],
     },
   },
   build: {
@@ -38,7 +44,10 @@ export default defineConfig({
     },
   },
   plugins: [
-    cloudflare({ viteEnvironment: { name: 'ssr' } }),
+    cloudflare({
+      viteEnvironment: { name: 'ssr' },
+      auxiliaryWorkers: [{ configPath: './sandbox-worker/wrangler.jsonc' }],
+    }),
     tsconfigPaths({ projects: ['./tsconfig.json'] }),
     tailwindcss(),
     tanstackStart(),
