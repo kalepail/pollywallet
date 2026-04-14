@@ -1,12 +1,12 @@
 // --- Policy Schema Types ---
 // Deterministic JSON schema that describes a policy contract.
-// Version: pollywallet-policy/v2
+// Version: pollywallet-policy/v0
 //
 // Schema is spec-driven: function signatures come from contract WASM specs
 // with named, typed parameters. Constraints are per-argument. Complex
 // enforcement behaviors are described via natural language notes.
 
-export const SCHEMA_VERSION = "pollywallet-policy/v2";
+export const SCHEMA_VERSION = "pollywallet-policy/v0";
 
 // --- Argument Constraint Types ---
 
