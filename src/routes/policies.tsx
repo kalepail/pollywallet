@@ -79,6 +79,7 @@ function PolicyBuilder() {
   // Step 3: Code Generation
   const [generatedCode, setGeneratedCode] = useState("");
   const [streamingCode, setStreamingCode] = useState("");
+  const [reasoningText, setReasoningText] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamStats, setStreamStats] = useState<StreamStats>({
     tokenCount: 0,
@@ -279,6 +280,7 @@ function PolicyBuilder() {
     setError(null);
     setGeneratedCode("");
     setStreamingCode("");
+    setReasoningText("");
     setStreaming(true);
 
     const startTime = Date.now();
@@ -287,7 +289,9 @@ function PolicyBuilder() {
       linesOfCode: 0,
       tokensPerSecond: 0,
       startTime,
-      status: "streaming",
+      // K2.7 Code always reasons first, so a run opens in the thinking phase.
+      status: "reasoning",
+      reasoningCount: 0,
     });
 
     try {
@@ -302,9 +306,25 @@ function PolicyBuilder() {
 
       let code = "";
       let tokens = 0;
+      let reasoning = "";
 
       for await (const chunk of result) {
-        if (chunk.type === "token" && chunk.text) {
+        if (chunk.type === "reasoning" && chunk.text) {
+          // Thinking phase: show progress, but keep reasoning out of the code buffer.
+          reasoning += chunk.text;
+          const elapsed = (Date.now() - startTime) / 1000;
+          const count = chunk.reasoningCount ?? 0;
+
+          setReasoningText(reasoning);
+          setStreamStats({
+            tokenCount: 0,
+            linesOfCode: 0,
+            tokensPerSecond: elapsed > 0 ? count / elapsed : 0,
+            startTime,
+            status: "reasoning",
+            reasoningCount: count,
+          });
+        } else if (chunk.type === "token" && chunk.text) {
           code += chunk.text;
           tokens = chunk.tokenCount ?? tokens + 1;
           const elapsed = (Date.now() - startTime) / 1000;
@@ -422,7 +442,12 @@ function PolicyBuilder() {
         if (attempt < MAX_FIX_ATTEMPTS) {
           setError(`Compilation failed — auto-fixing with AI (attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS})...`);
           const fixResult = await requestFixCode(codeToTest, testResult.compileOutput, (stats) => {
-            setError(`Auto-fixing (attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS}) — ${stats.tokenCount} tokens, ${stats.tokensPerSecond.toFixed(0)} tok/s`);
+            // The model thinks before it writes; report that phase separately so the
+            // status line moves instead of sitting at "0 tokens" for a minute-plus.
+            const progress = stats.reasoning
+              ? `thinking — ${stats.reasoningCount ?? 0} reasoning tokens`
+              : `${stats.tokenCount} tokens, ${stats.tokensPerSecond.toFixed(0)} tok/s`;
+            setError(`Auto-fixing (attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS}) — ${progress}`);
           });
           if (fixResult.success && fixResult.code) {
             timeline[timeline.length - 1].fixed = true;
@@ -847,6 +872,7 @@ function PolicyBuilder() {
               loading={loading}
               streaming={streaming}
               streamingCode={streamingCode}
+              reasoningText={reasoningText}
               stats={streamStats}
               onEdit={setGeneratedCode}
             />

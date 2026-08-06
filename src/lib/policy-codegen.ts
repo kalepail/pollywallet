@@ -2,10 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
 import type { PolicySchema } from "./policy-schema";
 import { schemaToJSON, validateSchema } from "./policy-schema";
+import { POLICY_CODEGEN_MODEL } from "./constants";
 
 // --- Reference source code embedded as constants ---
 // These are the COMPLETE real implementations from the OpenZeppelin Stellar Contracts repo.
-// With 256k context on Kimi K2.5, we include full source for maximum fidelity.
+// With 262k context on Kimi K2.7 Code, we include full source for maximum fidelity.
 
 const POLICY_TRAIT_SOURCE = `\
 use soroban_sdk::{auth::Context, contractclient, Address, Env, FromVal, Val, Vec};
@@ -778,12 +779,21 @@ function validateFixInput(data: unknown): FixInput {
 
 /** Chunk type sent from server to client during streaming generation. */
 export interface GenerateChunk {
-  /** "token" for code tokens, "error" for errors, "done" for completion */
-  type: "token" | "error" | "done";
-  /** The token text (for type="token") or error message (for type="error") */
+  /**
+   * "reasoning" for the model's thinking phase, "token" for code tokens,
+   * "error" for errors, "done" for completion.
+   *
+   * K2.7 Code always reasons before emitting code, so a generation opens with a
+   * run of "reasoning" chunks and no "token" chunks at all. They are streamed so
+   * the UI can show progress, but they are NEVER appended to the code buffer.
+   */
+  type: "reasoning" | "token" | "error" | "done";
+  /** The token text (for "token"/"reasoning") or error message (for "error") */
   text?: string;
-  /** Running total of tokens emitted so far */
+  /** Running total of code tokens emitted so far */
   tokenCount?: number;
+  /** Running total of reasoning tokens emitted so far */
+  reasoningCount?: number;
 }
 
 /**
@@ -813,10 +823,11 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
     }
 
     let tokenCount = 0;
+    let reasoningCount = 0;
     let codeBuffer = "";
 
     try {
-      const aiStream = (await ai.run("@cf/moonshotai/kimi-k2.5", {
+      const aiStream = (await ai.run(POLICY_CODEGEN_MODEL, {
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
@@ -824,8 +835,12 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
         stream: true,
         max_tokens: 16384,
         temperature: 0.1,
-        chat_template_kwargs: { enable_thinking: false },
-      })) as ReadableStream;
+        // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
+        // endpoint — the default splits reasoning into `delta.reasoning_content` (which
+        // extractTokenFromChunk ignores) and leaves `delta.content` as pure fenced code.
+        // Passing `thinking: false` does NOT disable reasoning; it merges the reasoning
+        // prose INTO `delta.content`, poisoning codeBuffer with non-Rust text.
+      })) as unknown as ReadableStream;
 
       const reader = aiStream.getReader();
       const decoder = new TextDecoder();
@@ -844,6 +859,12 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
           if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
           try {
             const json = JSON.parse(trimmed.slice(6));
+            // Reasoning is streamed for UI progress only — never into codeBuffer.
+            const reasoning = extractReasoningFromChunk(json);
+            if (reasoning) {
+              reasoningCount++;
+              yield { type: "reasoning", text: reasoning, reasoningCount };
+            }
             const token = extractTokenFromChunk(json);
             if (token) {
               tokenCount++;
@@ -900,10 +921,11 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
     }
 
     let tokenCount = 0;
+    let reasoningCount = 0;
     let codeBuffer = "";
 
     try {
-      const aiStream = (await ai.run("@cf/moonshotai/kimi-k2.5", {
+      const aiStream = (await ai.run(POLICY_CODEGEN_MODEL, {
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: fixPrompt },
@@ -911,8 +933,12 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
         stream: true,
         max_tokens: 16384,
         temperature: 0.1,
-        chat_template_kwargs: { enable_thinking: false },
-      })) as ReadableStream;
+        // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
+        // endpoint — the default splits reasoning into `delta.reasoning_content` (which
+        // extractTokenFromChunk ignores) and leaves `delta.content` as pure fenced code.
+        // Passing `thinking: false` does NOT disable reasoning; it merges the reasoning
+        // prose INTO `delta.content`, poisoning codeBuffer with non-Rust text.
+      })) as unknown as ReadableStream;
 
       const reader = aiStream.getReader();
       const decoder = new TextDecoder();
@@ -931,6 +957,12 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
           if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
           try {
             const json = JSON.parse(trimmed.slice(6));
+            // Reasoning is streamed for UI progress only — never into codeBuffer.
+            const reasoning = extractReasoningFromChunk(json);
+            if (reasoning) {
+              reasoningCount++;
+              yield { type: "reasoning", text: reasoning, reasoningCount };
+            }
             const token = extractTokenFromChunk(json);
             if (token) {
               tokenCount++;
@@ -991,7 +1023,12 @@ export async function requestStreamingGeneration(
 export async function requestFixCode(
   rustCode: string,
   compileErrors: string,
-  onProgress?: (stats: { tokenCount: number; tokensPerSecond: number }) => void,
+  onProgress?: (stats: {
+    tokenCount: number;
+    tokensPerSecond: number;
+    reasoningCount?: number;
+    reasoning?: boolean;
+  }) => void,
 ): Promise<{ success: boolean; error: string | null; code: string | null }> {
   // Strip dependency compilation noise — only send actual errors/warnings
   const cleanErrors = compileErrors
@@ -1016,11 +1053,21 @@ export async function requestFixCode(
   let error: string | null = null;
 
   for await (const chunk of generator) {
-    if (chunk.type === "token" && chunk.tokenCount && onProgress) {
+    if (chunk.type === "reasoning" && chunk.reasoningCount && onProgress) {
+      // Thinking phase — no code yet. Report it so the UI isn't silent for ~85s.
+      const elapsed = (Date.now() - startTime) / 1000;
+      onProgress({
+        tokenCount: 0,
+        tokensPerSecond: elapsed > 0 ? chunk.reasoningCount / elapsed : 0,
+        reasoningCount: chunk.reasoningCount,
+        reasoning: true,
+      });
+    } else if (chunk.type === "token" && chunk.tokenCount && onProgress) {
       const elapsed = (Date.now() - startTime) / 1000;
       onProgress({
         tokenCount: chunk.tokenCount,
         tokensPerSecond: elapsed > 0 ? chunk.tokenCount / elapsed : 0,
+        reasoning: false,
       });
     } else if (chunk.type === "done") {
       finalCode = chunk.text ?? null;
@@ -1040,7 +1087,23 @@ export async function requestFixCode(
  * Extract the token text from a streaming chunk, supporting both
  * legacy Workers AI format and OpenAI-compatible format.
  */
-function extractTokenFromChunk(json: any): string {
+/**
+ * Extract reasoning text from a streaming chunk. Kimi returns it on
+ * `delta.reasoning_content`; the CF changelog documents `reasoning` for K2.6+,
+ * so both are read. Kept strictly separate from extractTokenFromChunk — reasoning
+ * is prose and must never enter the Rust code buffer.
+ */
+export function extractReasoningFromChunk(json: any): string {
+  const delta = json.choices?.[0]?.delta;
+  if (typeof delta?.reasoning_content === "string") return delta.reasoning_content;
+  if (typeof delta?.reasoning === "string") return delta.reasoning;
+  const message = json.choices?.[0]?.message;
+  if (typeof message?.reasoning_content === "string") return message.reasoning_content;
+  if (typeof message?.reasoning === "string") return message.reasoning;
+  return "";
+}
+
+export function extractTokenFromChunk(json: any): string {
   // Legacy Workers AI format: { response: "token" }
   if (typeof json.response === "string") {
     return json.response;
@@ -1074,7 +1137,7 @@ function stripMarkdownFences(code: string): string {
 
 /**
  * Unescape string literal escape sequences in AI-generated code.
- * Some models (e.g., Kimi K2.5) output \\n, \\t, etc. as literal
+ * Some models (e.g., the Kimi K2 family) output \\n, \\t, etc. as literal
  * escape sequences in the JSON content instead of actual whitespace.
  * Also handles \\x3C -> < which appears for generics in Rust.
  */

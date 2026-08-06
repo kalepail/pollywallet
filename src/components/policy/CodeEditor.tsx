@@ -9,7 +9,10 @@ interface StreamStats {
   linesOfCode: number;
   tokensPerSecond: number;
   startTime: number;
-  status: "idle" | "streaming" | "highlighting" | "done" | "error";
+  /** "reasoning" is the model's thinking phase, before any code exists. */
+  status: "idle" | "reasoning" | "streaming" | "highlighting" | "done" | "error";
+  /** Reasoning tokens seen so far — the only progress signal during "reasoning". */
+  reasoningCount?: number;
 }
 
 interface CodeEditorProps {
@@ -17,6 +20,8 @@ interface CodeEditorProps {
   loading?: boolean;
   streaming?: boolean;
   streamingCode?: string;
+  /** Live reasoning text, shown while status is "reasoning" and no code exists yet. */
+  reasoningText?: string;
   stats?: StreamStats;
   onEdit: (code: string) => void;
 }
@@ -28,6 +33,7 @@ export default function CodeEditor({
   loading,
   streaming,
   streamingCode,
+  reasoningText,
   stats,
   onEdit,
 }: CodeEditorProps) {
@@ -42,7 +48,7 @@ export default function CodeEditor({
     if (streaming && codeRef.current) {
       codeRef.current.scrollTop = codeRef.current.scrollHeight;
     }
-  }, [streaming, streamingCode]);
+  }, [streaming, streamingCode, reasoningText]);
 
   // Highlight with Shiki when code is finalized (not during streaming)
   useEffect(() => {
@@ -108,9 +114,23 @@ export default function CodeEditor({
       {stats && stats.status !== "idle" && (
         <div className="flex items-center gap-4 px-5 py-2 bg-slate-900/50 border-b border-slate-700/40 text-xs">
           <Badge variant="purple"><Lightning size={12} /> {stats.tokensPerSecond.toFixed(1)} tok/s</Badge>
-          <Badge variant="neutral"><Hash size={12} /> {stats.tokenCount.toLocaleString()} tokens</Badge>
-          <Badge variant="neutral"><FileText size={12} /> {stats.linesOfCode} lines</Badge>
+          {stats.status === "reasoning" ? (
+            <Badge variant="neutral">
+              <Hash size={12} /> {(stats.reasoningCount ?? 0).toLocaleString()} reasoning tokens
+            </Badge>
+          ) : (
+            <>
+              <Badge variant="neutral"><Hash size={12} /> {stats.tokenCount.toLocaleString()} tokens</Badge>
+              <Badge variant="neutral"><FileText size={12} /> {stats.linesOfCode} lines</Badge>
+            </>
+          )}
           <div className="ml-auto flex items-center gap-1.5">
+            {stats.status === "reasoning" && (
+              <span className="flex items-center gap-1 text-violet-400">
+                <span className="w-1.5 h-1.5 bg-violet-400 rounded-full animate-pulse" />
+                Thinking
+              </span>
+            )}
             {stats.status === "streaming" && (
               <span className="flex items-center gap-1 text-emerald-400">
                 <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
@@ -158,9 +178,17 @@ export default function CodeEditor({
             className="p-4 overflow-x-auto text-sm text-gray-300 font-mono leading-relaxed max-h-[32rem] overflow-y-auto bg-slate-900/70"
           >
             {displayCode || (
-              <span className="text-gray-500 italic">
-                No code generated yet. Click "Generate Policy Code" to start.
-              </span>
+              // No code yet: during the thinking phase show the model's reasoning so the
+              // panel isn't blank for the ~85s K2.7 Code spends before its first code token.
+              reasoningText ? (
+                <span className="text-violet-300/70 italic whitespace-pre-wrap">
+                  {reasoningText}
+                </span>
+              ) : (
+                <span className="text-gray-500 italic">
+                  No code generated yet. Click "Generate Policy Code" to start.
+                </span>
+              )
             )}
             {streaming && (
               <span className="inline-block w-2 h-4 bg-violet-400 ml-0.5 animate-pulse" />

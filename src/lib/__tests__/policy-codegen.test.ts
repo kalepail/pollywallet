@@ -6,7 +6,12 @@ vi.mock("@tanstack/react-start", () => ({
   }),
 }));
 
-import { buildSystemPrompt, buildUserPrompt } from "../policy-codegen";
+import {
+  buildSystemPrompt,
+  buildUserPrompt,
+  extractTokenFromChunk,
+  extractReasoningFromChunk,
+} from "../policy-codegen";
 import { schemaFromPatterns, type PolicySchema, type TxPattern, SCHEMA_VERSION } from "../policy-schema";
 
 describe("buildSystemPrompt", () => {
@@ -96,5 +101,55 @@ describe("end-to-end: execute pattern -> schema -> prompt", () => {
 
     expect(prompt).toContain("CTARGET123");
     expect(prompt).toContain("transfer");
+  });
+});
+
+describe("extractTokenFromChunk: reasoning must never reach the code buffer", () => {
+  // Kimi K2.7 Code always reasons. Frames below are the real shape returned by
+  // @cf/moonshotai/kimi-k2.7-code when streaming with no chat_template_kwargs:
+  // reasoning goes to delta.reasoning_content, code to delta.content.
+  it("ignores reasoning_content and keeps only content", () => {
+    const frames = [
+      { choices: [{ delta: { content: "", reasoning_content: null, role: "assistant" } }] },
+      { choices: [{ delta: { reasoning_content: "The user wants a policy that " } }] },
+      { choices: [{ delta: { reasoning_content: "checks edge cases first.\n" } }] },
+      { choices: [{ delta: { content: "#![no_std]\n" } }] },
+      { choices: [{ delta: { content: "pub struct P;" } }] },
+    ];
+    const buffer = frames.map(extractTokenFromChunk).join("");
+    expect(buffer).toBe("#![no_std]\npub struct P;");
+    expect(buffer).not.toContain("The user wants");
+  });
+
+  it("still handles the legacy and non-streaming shapes", () => {
+    expect(extractTokenFromChunk({ response: "tok" })).toBe("tok");
+    expect(extractTokenFromChunk({ choices: [{ message: { content: "full" } }] })).toBe("full");
+    expect(extractTokenFromChunk({ choices: [{ delta: { role: "assistant" } }] })).toBe("");
+  });
+});
+
+describe("extractReasoningFromChunk: reasoning is streamed but stays separate", () => {
+  const frames = [
+    { choices: [{ delta: { content: "", reasoning_content: null, role: "assistant" } }] },
+    { choices: [{ delta: { reasoning_content: "The user wants a policy that " } }] },
+    { choices: [{ delta: { reasoning_content: "checks edge cases first.\n" } }] },
+    { choices: [{ delta: { content: "#![no_std]\n" } }] },
+    { choices: [{ delta: { content: "pub struct P;" } }] },
+  ];
+
+  it("collects reasoning without ever overlapping the code buffer", () => {
+    const code = frames.map(extractTokenFromChunk).join("");
+    const reasoning = frames.map(extractReasoningFromChunk).join("");
+
+    expect(code).toBe("#![no_std]\npub struct P;");
+    expect(reasoning).toBe("The user wants a policy that checks edge cases first.\n");
+    // The two streams must be disjoint — this is the bug that `thinking: false` caused.
+    expect(code).not.toContain("The user wants");
+    expect(reasoning).not.toContain("no_std");
+  });
+
+  it("reads the `reasoning` field name too, per the K2.6+ changelog", () => {
+    expect(extractReasoningFromChunk({ choices: [{ delta: { reasoning: "hm" } }] })).toBe("hm");
+    expect(extractReasoningFromChunk({ choices: [{ delta: { content: "code" } }] })).toBe("");
   });
 });
