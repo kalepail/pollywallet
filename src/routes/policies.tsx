@@ -48,9 +48,8 @@ import {
   LEDGERS_PER_HOUR,
   type StoredWallet,
 } from "@/lib/passkey";
-// Note: do NOT import submitToRelayer from relayer.ts directly in route files.
-// It has heavy server-only deps that break the client bundle.
-// Use requestSubmitToRelayer from policy-deploy.ts instead.
+// Relayer submission goes through requestSubmitToRelayer in policy-deploy.ts —
+// relayer.ts has heavy server-only deps that break the client bundle if imported here.
 
 export const Route = createFileRoute("/policies")({ component: PolicyBuilder });
 

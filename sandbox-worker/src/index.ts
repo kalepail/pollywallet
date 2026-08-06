@@ -18,26 +18,41 @@ interface TestRequest {
 }
 
 const SANDBOX_ID = "policy-compiler";
-const PROJECT_DIR = "/workspace/policy-contract";
 
 /** Track whether we've fetched dependencies in this container lifetime. */
 let depsFetched = false;
 
+/**
+ * Each request gets its own project directory. All requests previously shared
+ * `/workspace/policy-contract`, so two concurrent users would overwrite each
+ * other's `lib.rs` and could be handed back the wrong contract's WASM.
+ *
+ * `CARGO_TARGET_DIR` stays shared so the crate cache is still reused; cargo
+ * takes a lock on it, which serializes concurrent builds instead of corrupting
+ * them.
+ */
+const CARGO_ENV = "CARGO_TARGET_DIR=/workspace/cargo-target";
+
+function newProjectDir(): string {
+  return `/workspace/policy-${crypto.randomUUID()}`;
+}
+
 async function setupProject(
   sandbox: ReturnType<typeof getSandbox>,
+  projectDir: string,
   cargoToml: string,
   libRs: string
 ) {
-  await sandbox.exec(`mkdir -p ${PROJECT_DIR}/src`);
-  await sandbox.writeFile(`${PROJECT_DIR}/Cargo.toml`, cargoToml);
-  await sandbox.writeFile(`${PROJECT_DIR}/src/lib.rs`, libRs);
+  await sandbox.exec(`mkdir -p ${projectDir}/src`);
+  await sandbox.writeFile(`${projectDir}/Cargo.toml`, cargoToml);
+  await sandbox.writeFile(`${projectDir}/src/lib.rs`, libRs);
 
   // Fetch dependencies separately on first run. This can take 60-120s
   // on a cold container (downloading ~180 crates). Subsequent runs hit
   // the local cargo cache and are instant.
   if (!depsFetched) {
-    const fetchResult = await sandbox.exec("cargo fetch 2>&1", {
-      cwd: PROJECT_DIR,
+    const fetchResult = await sandbox.exec(`${CARGO_ENV} cargo fetch 2>&1`, {
+      cwd: projectDir,
       timeout: 300_000, // 5 minutes for cold dependency download
     });
     if (fetchResult.success) {
@@ -63,15 +78,16 @@ async function handleCompile(
   }
 
   const sandbox = getSandbox(env.Sandbox, SANDBOX_ID);
+  const projectDir = newProjectDir();
 
   try {
-    await setupProject(sandbox, cargoToml, libRs);
+    await setupProject(sandbox, projectDir, cargoToml, libRs);
 
     // Build the contract using stellar-cli (deps already fetched in setupProject)
     const buildResult = await sandbox.exec(
-      "stellar contract build --out-dir target",
+      `${CARGO_ENV} stellar contract build --out-dir target`,
       {
-        cwd: PROJECT_DIR,
+        cwd: projectDir,
         timeout: 180_000,
       }
     );
@@ -97,7 +113,7 @@ async function handleCompile(
     }
 
     // Read the compiled WASM file
-    const wasmPath = `${PROJECT_DIR}/target/policy_contract.wasm`;
+    const wasmPath = `${projectDir}/target/policy_contract.wasm`;
     const existsResult = await sandbox.exec(`test -f ${wasmPath} && echo "exists"`);
 
     let wasmBase64: string | null = null;
@@ -149,16 +165,17 @@ async function handleTest(
   }
 
   const sandbox = getSandbox(env.Sandbox, SANDBOX_ID);
+  const projectDir = newProjectDir();
 
   try {
     // If testCode is provided, append it to the lib.rs
     const fullLibRs = testCode ? `${libRs}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use soroban_sdk::{Env, Address};\n\n${testCode}\n}` : libRs;
 
-    await setupProject(sandbox, cargoToml, fullLibRs);
+    await setupProject(sandbox, projectDir, cargoToml, fullLibRs);
 
     // Run cargo test (deps already fetched in setupProject)
-    const testResult = await sandbox.exec("cargo test 2>&1", {
-      cwd: PROJECT_DIR,
+    const testResult = await sandbox.exec(`${CARGO_ENV} cargo test 2>&1`, {
+      cwd: projectDir,
       timeout: 240_000,
     });
 
@@ -251,11 +268,12 @@ async function handleDeploy(
   }
 
   const sandbox = getSandbox(env.Sandbox, SANDBOX_ID);
+  const projectDir = newProjectDir();
 
   try {
     // Write the WASM file using the sandbox file API
-    const wasmPath = `${PROJECT_DIR}/target/policy_contract.wasm`;
-    await sandbox.exec(`mkdir -p ${PROJECT_DIR}/target`);
+    const wasmPath = `${projectDir}/target/policy_contract.wasm`;
+    await sandbox.exec(`mkdir -p ${projectDir}/target`);
 
     // Write base64 to a file, then decode it
     await sandbox.writeFile(`${wasmPath}.b64`, wasmBase64);
