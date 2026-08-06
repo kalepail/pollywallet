@@ -59,7 +59,10 @@ The policy builder feature uses several Cloudflare services together:
 
 - Version: `v0`
 - Deterministic JSON schema bridges GUI → AI code generation
-- Schema types: threshold, spending_limit, allowlist, blocklist, time_lock, function_whitelist, max_single_transfer, daily_tx_count
+- Argument constraint kinds: unconstrained, exact, range, allowlist, blocklist
+- Global rule types: threshold, weighted_threshold, time_lock
+  (these are what `src/lib/policy-schema.ts` actually defines — the longer list
+  in PLAN.md was never implemented)
 
 ## Stellar Smart Wallet Policies
 

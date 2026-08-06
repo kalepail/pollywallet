@@ -14,3 +14,21 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
     monospace;
 }
+
+/*
+ * The UI uses `focus:outline-none` in 17 places to swap the default ring for a
+ * border-colour change. Inputs still read as focused that way, but buttons and
+ * selects were left with no keyboard indicator at all. Restore one for keyboard
+ * focus only — `:focus-visible` does not fire on mouse clicks, so this costs
+ * nothing visually for pointer users.
+ *
+ * Deliberately unlayered: Tailwind's utilities live in @layer, and unlayered
+ * rules win the cascade regardless of specificity, so this beats
+ * `focus:outline-none` without needing !important or per-element edits.
+ */
+:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: #22d3ee; /* cyan-400 */
+  outline-offset: 2px;
+}

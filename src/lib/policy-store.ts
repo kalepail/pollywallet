@@ -96,39 +96,6 @@ export const loadPolicy = createServerFn({ method: "GET" })
     };
   });
 
-/** List all saved policies (metadata only for the list view). */
-export const listPolicies = createServerFn({ method: "GET" })
-  .handler(async (): Promise<Array<{
-    contractAddress: string;
-    name: string;
-    network: string;
-    deployedAt: string;
-  }>> => {
-    const kv = env.POLICIES_KV;
-    if (!kv) return [];
-
-    const indexRaw = await kv.get("policy:index");
-    if (!indexRaw) return [];
-
-    const addresses: string[] = JSON.parse(indexRaw);
-    const policies = [];
-
-    for (const addr of addresses) {
-      const { metadata } = await kv.getWithMetadata(`policy:${addr}`);
-      if (metadata) {
-        const meta = metadata as { name: string; network: string; deployedAt: string };
-        policies.push({
-          contractAddress: addr,
-          name: meta.name,
-          network: meta.network,
-          deployedAt: meta.deployedAt,
-        });
-      }
-    }
-
-    return policies;
-  });
-
 // --- Client-side convenience ---
 
 /** Save a policy after successful deployment. Call from the UI after deploy succeeds. */

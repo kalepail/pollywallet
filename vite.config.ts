@@ -39,7 +39,7 @@ export default defineConfig({
   },
   build: {
     commonjsOptions: {
-      include: [/node_modules/, /multisig-account/],
+      include: [/node_modules/],
       transformMixedEsModules: true,
     },
   },

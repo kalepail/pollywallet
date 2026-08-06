@@ -1,6 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useWallet } from "../hooks/useWallet";
-import { Wallet, Plus, Send, Coins, LogOut, Copy, Check, Loader2, CircleAlert, CircleCheck } from "lucide-react";
+import {
+  Wallet,
+  Plus,
+  PaperPlaneTilt,
+  Coins,
+  SignOut,
+  Copy,
+  Check,
+  WarningCircle,
+  CheckCircle,
+  ArrowSquareOut,
+} from "@phosphor-icons/react";
+import { Loader } from "@cloudflare/kumo/components/loader";
 
 export const Route = createFileRoute("/")({ component: App });
 
@@ -9,7 +21,15 @@ export const Route = createFileRoute("/")({ component: App });
  * passkey..." and a hard failure looked identical — and these operations take
  * 10-60s. Colour + icon per state, the way Deel reports payment status.
  */
-function StatusPanel({ status, kind }: { status: string; kind: "idle" | "busy" | "done" | "error" }) {
+function StatusPanel({
+  status,
+  kind,
+  txHash,
+}: {
+  status: string;
+  kind: "idle" | "busy" | "done" | "error";
+  txHash?: string | null;
+}) {
   if (!status) return null;
 
   const styles = {
@@ -19,9 +39,9 @@ function StatusPanel({ status, kind }: { status: string; kind: "idle" | "busy" |
     idle: "bg-slate-800/60 border-slate-700 text-gray-300",
   }[kind];
 
-  const icon = kind === "error" ? <CircleAlert className="w-4 h-4 shrink-0" />
-    : kind === "done" ? <CircleCheck className="w-4 h-4 shrink-0" />
-    : <Loader2 className="w-4 h-4 shrink-0 animate-spin" />;
+  const icon = kind === "error" ? <WarningCircle size={16} weight="fill" className="shrink-0" />
+    : kind === "done" ? <CheckCircle size={16} weight="fill" className="shrink-0" />
+    : <Loader size={16} />;
 
   return (
     <div
@@ -30,14 +50,25 @@ function StatusPanel({ status, kind }: { status: string; kind: "idle" | "busy" |
       className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm ${styles}`}
     >
       {icon}
-      <span className="break-words">{status}</span>
+      <span className="break-words flex-1">{status}</span>
+      {kind === "done" && txHash && (
+        <a
+          href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="shrink-0 inline-flex items-center gap-1 underline underline-offset-2 hover:no-underline"
+        >
+          View transaction
+          <ArrowSquareOut size={14} />
+        </a>
+      )}
     </div>
   );
 }
 
 function App() {
   const {
-    wallet, balance, status, statusKind, loading, copied, destination, amount,
+    wallet, balance, status, statusKind, lastTxHash, loading, copied, destination, amount,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
@@ -48,7 +79,7 @@ function App() {
       <div className="min-h-screen bg-gradient-to-b from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center px-4">
         <div className="max-w-md w-full">
           <div className="text-center mb-8">
-            <Wallet className="w-16 h-16 text-cyan-400 mx-auto mb-4" />
+            <Wallet size={64} weight="duotone" className="text-cyan-400 mx-auto mb-4" />
             <h1 className="text-4xl font-bold text-white mb-2">PollyWallet</h1>
             <p className="text-gray-400">Passkey-secured smart wallet on Stellar Testnet</p>
           </div>
@@ -57,11 +88,11 @@ function App() {
             disabled={loading}
             className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-cyan-500 hover:bg-cyan-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors shadow-lg shadow-cyan-500/25"
           >
-            {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
+            {loading ? <Loader size={20} /> : <Plus size={20} weight="bold" />}
             Create Smart Wallet
           </button>
           <div className="mt-4">
-            <StatusPanel status={status} kind={statusKind} />
+            <StatusPanel status={status} kind={statusKind} txHash={lastTxHash} />
           </div>
         </div>
       </div>
@@ -79,7 +110,7 @@ function App() {
           <div className="mt-3 flex items-center gap-2">
             <code className="text-xs text-gray-500 truncate flex-1">{wallet.contractId}</code>
             <button onClick={handleCopy} className="text-gray-400 hover:text-white transition-colors" title="Copy address">
-              {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+              {copied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
             </button>
           </div>
         </div>
@@ -89,13 +120,13 @@ function App() {
           disabled={loading}
           className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
         >
-          {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Coins className="w-5 h-5" />}
+          {loading ? <Loader size={20} /> : <Coins size={20} weight="bold" />}
           Fund with Friendbot
         </button>
 
         <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
           <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-            <Send className="w-5 h-5 text-cyan-400" />
+            <PaperPlaneTilt size={20} weight="bold" className="text-cyan-400" />
             Send XLM
           </h2>
           <div className="space-y-3">
@@ -135,7 +166,7 @@ function App() {
                   <button onClick={handleTransfer} disabled={loading || !destination || !amount}
                     className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
                   >
-                    {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-4 h-4" />}
+                    {loading ? <Loader size={20} /> : <PaperPlaneTilt size={16} weight="bold" />}
                     Send
                   </button>
                 );
@@ -145,7 +176,7 @@ function App() {
                   <button disabled
                     className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500/50 text-white/50 font-semibold rounded-xl"
                   >
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader size={16} />
                     Loading policies...
                   </button>
                 );
@@ -194,7 +225,7 @@ function App() {
                         : "bg-cyan-500 hover:bg-cyan-600"
                     } disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors`}
                   >
-                    {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-4 h-4" />}
+                    {loading ? <Loader size={20} /> : <PaperPlaneTilt size={16} weight="bold" />}
                     {isPolicy ? "Send with Policy" : "Send"}
                   </button>
                 </>
@@ -203,12 +234,12 @@ function App() {
           </div>
         </div>
 
-        <StatusPanel status={status} kind={statusKind} />
+        <StatusPanel status={status} kind={statusKind} txHash={lastTxHash} />
 
         <button onClick={handleDisconnect}
           className="w-full flex items-center justify-center gap-2 px-6 py-3 text-gray-400 hover:text-red-400 transition-colors"
         >
-          <LogOut className="w-4 h-4" />
+          <SignOut size={16} weight="bold" />
           Disconnect
         </button>
       </div>

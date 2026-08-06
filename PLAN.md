@@ -1,5 +1,18 @@
 # Policy Builder — Implementation Plan
 
+> **Historical planning document — superseded by the shipped code.**
+> Kept for the design rationale, not as a description of current behaviour. It
+> diverges from what was built in at least these ways:
+> - It specifies schema version `pollywallet-policy/v1`; the code ships `v0`
+>   (`src/lib/policy-schema.ts`, deliberately downgraded in commit `10014fd`).
+> - The `rules[]` array and the rule types `spending_limit`, `allowlist`,
+>   `function_whitelist`, `max_single_transfer` and `daily_tx_count` were never
+>   implemented. The shipped schema uses `contracts[]` with per-argument
+>   constraints plus `globalRules[]`.
+>
+> For current behaviour read `src/lib/policy-schema.ts`, `AGENTS.md` and the
+> README. Do not treat anything below as a specification.
+
 ## Overview
 
 A GUI-based policy builder that lets users input Stellar transaction hashes, analyze them to extract authorization patterns, generate a deterministic policy schema, use an AI agent (Cloudflare Workers AI / Kimi 2.5) to produce Rust/Soroban policy contract code, test it in a sandbox with the Stellar CLI, and finally compile, optimize, and deploy it to the network.

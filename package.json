@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "vite dev --port 3000",
-    "build": "pnpm --filter './bindings/*' build && vite build",
+    "build": "vite build",
     "preview": "pnpm run build && vite preview",
     "test": "vitest run",
     "test:e2e": "bash scripts/e2e-test.sh",
@@ -30,8 +30,6 @@
     "@tanstack/router-plugin": "^1.167.12",
     "base64url": "^3.0.1",
     "buffer": "^6.0.3",
-    "lucide-react": "^1.8.0",
-    "multisig-account": "workspace:*",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "shiki": "^4.0.2",

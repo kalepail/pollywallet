@@ -10,13 +10,6 @@ export interface DeployResult {
   wasmHash: string | null;
   contractAddress: string | null;
 }
-
-export interface InstallOnWalletResult {
-  success: boolean;
-  error: string | null;
-  hash: string | null;
-}
-
 // --- Server Functions ---
 
 interface DeployInput {
@@ -90,93 +83,6 @@ export const deployPolicyWasm = createServerFn({ method: "POST" })
         error: err.message || "Failed to reach sandbox service for deploy",
         wasmHash: null,
         contractAddress: null,
-      };
-    }
-  });
-
-// --- Install Policy on Smart Wallet ---
-
-interface InstallInput {
-  walletContractId: string;
-  policyAddress: string;
-  contextRuleId: number;
-  installParamsXdr: string;
-}
-
-function validateInstallInput(data: unknown): InstallInput {
-  if (typeof data !== "object" || data === null) {
-    throw new Error("Invalid payload");
-  }
-  const d = data as Record<string, unknown>;
-  if (typeof d.walletContractId !== "string" || !d.walletContractId) {
-    throw new Error("walletContractId is required");
-  }
-  if (typeof d.policyAddress !== "string" || !d.policyAddress) {
-    throw new Error("policyAddress is required");
-  }
-  if (typeof d.contextRuleId !== "number" || d.contextRuleId < 0) {
-    throw new Error("contextRuleId must be a non-negative number");
-  }
-  if (typeof d.installParamsXdr !== "string") {
-    throw new Error("installParamsXdr is required");
-  }
-  return {
-    walletContractId: d.walletContractId as string,
-    policyAddress: d.policyAddress as string,
-    contextRuleId: d.contextRuleId as number,
-    installParamsXdr: d.installParamsXdr as string,
-  };
-}
-
-/**
- * Install a deployed policy contract on a user's smart wallet.
- * Calls add_policy on the smart account via the relayer.
- *
- * This builds the invocation but does NOT sign it — the caller must
- * handle passkey signing of the auth entries before submitting.
- * Returns the host function XDR for the caller to sign and submit.
- */
-export const buildInstallPolicyTx = createServerFn({ method: "POST" })
-  .inputValidator(validateInstallInput)
-  .handler(async ({ data }): Promise<{
-    success: boolean;
-    error: string | null;
-    hostFuncXdr: string | null;
-  }> => {
-    const { walletContractId, policyAddress, contextRuleId, installParamsXdr } = data;
-
-    try {
-      // Lazy-import heavy Stellar SDK deps to avoid `require` errors in Workers
-      const { Address, xdr } = await import("@stellar/stellar-sdk");
-
-      // Build the add_policy invocation on the smart wallet
-      const hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
-        new xdr.InvokeContractArgs({
-          contractAddress: Address.fromString(walletContractId).toScAddress(),
-          functionName: "add_policy",
-          args: [
-            // context_rule_id
-            xdr.ScVal.scvU32(contextRuleId),
-            // policy address
-            xdr.ScVal.scvAddress(Address.fromString(policyAddress).toScAddress()),
-            // install_params (encoded as ScVal by the caller)
-            installParamsXdr
-              ? xdr.ScVal.fromXDR(installParamsXdr, "base64")
-              : xdr.ScVal.scvVoid(),
-          ],
-        })
-      );
-
-      return {
-        success: true,
-        error: null,
-        hostFuncXdr: hostFunc.toXDR("base64"),
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        error: err.message || "Failed to build install transaction",
-        hostFuncXdr: null,
       };
     }
   });
@@ -272,62 +178,6 @@ export const buildAddContextRuleTx = createServerFn({ method: "POST" })
     }
   });
 
-// --- Build Policy-scoped Execute Transaction ---
-
-interface PolicyExecuteInput {
-  walletContractId: string;
-  targetContractAddress: string;
-  functionName: string;
-  argsXdr: string; // base64 XDR of ScVal (Vec<Val>)
-}
-
-function validatePolicyExecuteInput(data: unknown): PolicyExecuteInput {
-  if (typeof data !== "object" || data === null) throw new Error("Invalid payload");
-  const d = data as Record<string, unknown>;
-  if (typeof d.walletContractId !== "string" || !d.walletContractId) throw new Error("walletContractId required");
-  if (typeof d.targetContractAddress !== "string" || !d.targetContractAddress) throw new Error("targetContractAddress required");
-  if (typeof d.functionName !== "string" || !d.functionName) throw new Error("functionName required");
-  if (typeof d.argsXdr !== "string") throw new Error("argsXdr required");
-  return d as unknown as PolicyExecuteInput;
-}
-
-/**
- * Build an execute() invocation on the smart wallet for a specific target
- * contract + function. This is the same pattern used by handleTransfer in
- * useWallet, but generic for any contract call that a policy might scope.
- */
-export const buildPolicyExecuteTx = createServerFn({ method: "POST" })
-  .inputValidator(validatePolicyExecuteInput)
-  .handler(async ({ data }): Promise<{
-    success: boolean;
-    error: string | null;
-    hostFuncXdr: string | null;
-  }> => {
-    const { walletContractId, targetContractAddress, functionName, argsXdr } = data;
-
-    try {
-      const { Address, xdr } = await import("@stellar/stellar-sdk");
-
-      const hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
-        new xdr.InvokeContractArgs({
-          contractAddress: Address.fromString(walletContractId).toScAddress(),
-          functionName: "execute",
-          args: [
-            xdr.ScVal.scvAddress(Address.fromString(targetContractAddress).toScAddress()),
-            xdr.ScVal.scvSymbol(functionName),
-            argsXdr
-              ? xdr.ScVal.fromXDR(argsXdr, "base64")
-              : xdr.ScVal.scvVec([]),
-          ],
-        })
-      );
-
-      return { success: true, error: null, hostFuncXdr: hostFunc.toXDR("base64") };
-    } catch (err: any) {
-      return { success: false, error: err.message || "Failed to build execute tx", hostFuncXdr: null };
-    }
-  });
-
 // --- Submit to Relayer (server function wrapper) ---
 // This wraps the relayer call so route files don't need to import
 // relayer.ts directly (which has heavy server-only dependencies that
@@ -397,16 +247,6 @@ export async function requestSubmitToRelayer(params: {
 export async function requestDeploy(wasmBase64: string): Promise<DeployResult> {
   return deployPolicyWasm({ data: { wasmBase64 } });
 }
-
-export async function requestBuildInstallTx(params: {
-  walletContractId: string;
-  policyAddress: string;
-  contextRuleId: number;
-  installParamsXdr: string;
-}): Promise<{ success: boolean; error: string | null; hostFuncXdr: string | null }> {
-  return buildInstallPolicyTx({ data: params });
-}
-
 export async function requestAddContextRule(params: {
   walletContractId: string;
   targetContractAddress: string;
@@ -416,13 +256,4 @@ export async function requestAddContextRule(params: {
   ruleName: string;
 }): Promise<{ success: boolean; error: string | null; hostFuncXdr: string | null }> {
   return buildAddContextRuleTx({ data: params });
-}
-
-export async function requestBuildExecuteTx(params: {
-  walletContractId: string;
-  targetContractAddress: string;
-  functionName: string;
-  argsXdr: string;
-}): Promise<{ success: boolean; error: string | null; hostFuncXdr: string | null }> {
-  return buildPolicyExecuteTx({ data: params });
 }
