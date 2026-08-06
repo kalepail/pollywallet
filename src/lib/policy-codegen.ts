@@ -2,10 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
 import type { PolicySchema } from "./policy-schema";
 import { schemaToJSON, validateSchema } from "./policy-schema";
+import { POLICY_CODEGEN_MODEL } from "./constants";
 
 // --- Reference source code embedded as constants ---
 // These are the COMPLETE real implementations from the OpenZeppelin Stellar Contracts repo.
-// With 256k context on Kimi K2.5, we include full source for maximum fidelity.
+// With 262k context on Kimi K2.7 Code, we include full source for maximum fidelity.
 
 const POLICY_TRAIT_SOURCE = `\
 use soroban_sdk::{auth::Context, contractclient, Address, Env, FromVal, Val, Vec};
@@ -778,13 +779,25 @@ function validateFixInput(data: unknown): FixInput {
 
 /** Chunk type sent from server to client during streaming generation. */
 export interface GenerateChunk {
-  /** "token" for code tokens, "error" for errors, "done" for completion */
-  type: "token" | "error" | "done";
-  /** The token text (for type="token") or error message (for type="error") */
+  /**
+   * "reasoning" for the model's thinking phase, "token" for code tokens,
+   * "error" for errors, "done" for completion.
+   *
+   * K2.7 Code always reasons before emitting code, so a generation opens with a
+   * run of "reasoning" chunks and no "token" chunks at all. They are streamed so
+   * the UI can show progress, but they are NEVER appended to the code buffer.
+   */
+  type: "reasoning" | "token" | "error" | "done";
+  /** The token text (for "token"/"reasoning") or error message (for "error") */
   text?: string;
-  /** Running total of tokens emitted so far */
+  /** Running total of code tokens emitted so far */
   tokenCount?: number;
+  /** Running total of reasoning tokens emitted so far */
+  reasoningCount?: number;
 }
+
+const POLICY_CODEGEN_TOKEN_BUDGET = 16_384;
+type PromptCacheUsage = { promptTokens: number; cachedTokens: number };
 
 /**
  * Streaming server function using async generator.
@@ -813,23 +826,30 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
     }
 
     let tokenCount = 0;
+    let reasoningCount = 0;
     let codeBuffer = "";
 
     try {
-      const aiStream = (await ai.run("@cf/moonshotai/kimi-k2.5", {
+      const aiStream = (await ai.run(POLICY_CODEGEN_MODEL, {
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
         stream: true,
-        max_tokens: 16384,
+        max_tokens: POLICY_CODEGEN_TOKEN_BUDGET,
         temperature: 0.1,
-        chat_template_kwargs: { enable_thinking: false },
-      })) as ReadableStream;
+        // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
+        // endpoint — the default splits reasoning into `delta.reasoning_content` (which
+        // extractTokenFromChunk ignores) and leaves `delta.content` as pure fenced code.
+        // Passing `thinking: false` does NOT disable reasoning; it merges the reasoning
+        // prose INTO `delta.content`, poisoning codeBuffer with non-Rust text.
+      })) as unknown as ReadableStream;
 
       const reader = aiStream.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = "";
+      let sawTerminalMarker = false;
+      let cacheUsage: PromptCacheUsage | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -841,9 +861,27 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
+          if (trimmed === "data: [DONE]") {
+            sawTerminalMarker = true;
+            continue;
+          }
+          if (!trimmed.startsWith("data: ")) continue;
           try {
             const json = JSON.parse(trimmed.slice(6));
+            cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+            if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+            const finishError = getFinishError(json);
+            if (finishError) {
+              logPromptCacheUsage("generate", cacheUsage);
+              yield { type: "error", text: finishError };
+              return;
+            }
+            // Reasoning is streamed for UI progress only — never into codeBuffer.
+            const reasoning = extractReasoningFromChunk(json);
+            if (reasoning) {
+              reasoningCount++;
+              yield { type: "reasoning", text: reasoning, reasoningCount };
+            }
             const token = extractTokenFromChunk(json);
             if (token) {
               tokenCount++;
@@ -857,9 +895,20 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
       }
 
       // Flush any remaining buffer content
-      if (sseBuffer.trim().startsWith("data: ") && sseBuffer.trim() !== "data: [DONE]") {
+      const trailing = sseBuffer.trim();
+      if (trailing === "data: [DONE]") {
+        sawTerminalMarker = true;
+      } else if (trailing.startsWith("data: ")) {
         try {
-          const json = JSON.parse(sseBuffer.trim().slice(6));
+          const json = JSON.parse(trailing.slice(6));
+          cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+          if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+          const finishError = getFinishError(json);
+          if (finishError) {
+            logPromptCacheUsage("generate", cacheUsage);
+            yield { type: "error", text: finishError };
+            return;
+          }
           const token = extractTokenFromChunk(json);
           if (token) {
             tokenCount++;
@@ -868,6 +917,12 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
         } catch {
           // Skip malformed final chunk
         }
+      }
+
+      logPromptCacheUsage("generate", cacheUsage);
+      if (!sawTerminalMarker) {
+        yield { type: "error", text: "AI response stream ended before a terminal marker was received." };
+        return;
       }
 
       // Clean and yield final result
@@ -900,23 +955,30 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
     }
 
     let tokenCount = 0;
+    let reasoningCount = 0;
     let codeBuffer = "";
 
     try {
-      const aiStream = (await ai.run("@cf/moonshotai/kimi-k2.5", {
+      const aiStream = (await ai.run(POLICY_CODEGEN_MODEL, {
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: fixPrompt },
         ],
         stream: true,
-        max_tokens: 16384,
+        max_tokens: POLICY_CODEGEN_TOKEN_BUDGET,
         temperature: 0.1,
-        chat_template_kwargs: { enable_thinking: false },
-      })) as ReadableStream;
+        // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
+        // endpoint — the default splits reasoning into `delta.reasoning_content` (which
+        // extractTokenFromChunk ignores) and leaves `delta.content` as pure fenced code.
+        // Passing `thinking: false` does NOT disable reasoning; it merges the reasoning
+        // prose INTO `delta.content`, poisoning codeBuffer with non-Rust text.
+      })) as unknown as ReadableStream;
 
       const reader = aiStream.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = "";
+      let sawTerminalMarker = false;
+      let cacheUsage: PromptCacheUsage | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -928,9 +990,27 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
+          if (trimmed === "data: [DONE]") {
+            sawTerminalMarker = true;
+            continue;
+          }
+          if (!trimmed.startsWith("data: ")) continue;
           try {
             const json = JSON.parse(trimmed.slice(6));
+            cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+            if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+            const finishError = getFinishError(json);
+            if (finishError) {
+              logPromptCacheUsage("fix", cacheUsage);
+              yield { type: "error", text: finishError };
+              return;
+            }
+            // Reasoning is streamed for UI progress only — never into codeBuffer.
+            const reasoning = extractReasoningFromChunk(json);
+            if (reasoning) {
+              reasoningCount++;
+              yield { type: "reasoning", text: reasoning, reasoningCount };
+            }
             const token = extractTokenFromChunk(json);
             if (token) {
               tokenCount++;
@@ -944,15 +1024,32 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
       }
 
       // Flush remaining buffer
-      if (sseBuffer.trim().startsWith("data: ") && sseBuffer.trim() !== "data: [DONE]") {
+      const trailing = sseBuffer.trim();
+      if (trailing === "data: [DONE]") {
+        sawTerminalMarker = true;
+      } else if (trailing.startsWith("data: ")) {
         try {
-          const json = JSON.parse(sseBuffer.trim().slice(6));
+          const json = JSON.parse(trailing.slice(6));
+          cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+          if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+          const finishError = getFinishError(json);
+          if (finishError) {
+            logPromptCacheUsage("fix", cacheUsage);
+            yield { type: "error", text: finishError };
+            return;
+          }
           const token = extractTokenFromChunk(json);
           if (token) {
             tokenCount++;
             codeBuffer += token;
           }
         } catch {}
+      }
+
+      logPromptCacheUsage("fix", cacheUsage);
+      if (!sawTerminalMarker) {
+        yield { type: "error", text: "AI response stream ended before a terminal marker was received." };
+        return;
       }
 
       const cleanCode = stripMarkdownFences(unescapeCodeContent(codeBuffer));
@@ -991,7 +1088,12 @@ export async function requestStreamingGeneration(
 export async function requestFixCode(
   rustCode: string,
   compileErrors: string,
-  onProgress?: (stats: { tokenCount: number; tokensPerSecond: number }) => void,
+  onProgress?: (stats: {
+    tokenCount: number;
+    tokensPerSecond: number;
+    reasoningCount?: number;
+    reasoning?: boolean;
+  }) => void,
 ): Promise<{ success: boolean; error: string | null; code: string | null }> {
   // Strip dependency compilation noise — only send actual errors/warnings
   const cleanErrors = compileErrors
@@ -1016,11 +1118,21 @@ export async function requestFixCode(
   let error: string | null = null;
 
   for await (const chunk of generator) {
-    if (chunk.type === "token" && chunk.tokenCount && onProgress) {
+    if (chunk.type === "reasoning" && chunk.reasoningCount && onProgress) {
+      // Thinking phase — no code yet. Report it so the UI isn't silent for ~85s.
+      const elapsed = (Date.now() - startTime) / 1000;
+      onProgress({
+        tokenCount: 0,
+        tokensPerSecond: elapsed > 0 ? chunk.reasoningCount / elapsed : 0,
+        reasoningCount: chunk.reasoningCount,
+        reasoning: true,
+      });
+    } else if (chunk.type === "token" && chunk.tokenCount && onProgress) {
       const elapsed = (Date.now() - startTime) / 1000;
       onProgress({
         tokenCount: chunk.tokenCount,
         tokensPerSecond: elapsed > 0 ? chunk.tokenCount / elapsed : 0,
+        reasoning: false,
       });
     } else if (chunk.type === "done") {
       finalCode = chunk.text ?? null;
@@ -1040,7 +1152,23 @@ export async function requestFixCode(
  * Extract the token text from a streaming chunk, supporting both
  * legacy Workers AI format and OpenAI-compatible format.
  */
-function extractTokenFromChunk(json: any): string {
+/**
+ * Extract reasoning text from a streaming chunk. Kimi returns it on
+ * `delta.reasoning_content`; the CF changelog documents `reasoning` for K2.6+,
+ * so both are read. Kept strictly separate from extractTokenFromChunk — reasoning
+ * is prose and must never enter the Rust code buffer.
+ */
+export function extractReasoningFromChunk(json: any): string {
+  const delta = json.choices?.[0]?.delta;
+  if (typeof delta?.reasoning_content === "string") return delta.reasoning_content;
+  if (typeof delta?.reasoning === "string") return delta.reasoning;
+  const message = json.choices?.[0]?.message;
+  if (typeof message?.reasoning_content === "string") return message.reasoning_content;
+  if (typeof message?.reasoning === "string") return message.reasoning;
+  return "";
+}
+
+export function extractTokenFromChunk(json: any): string {
   // Legacy Workers AI format: { response: "token" }
   if (typeof json.response === "string") {
     return json.response;
@@ -1054,6 +1182,29 @@ function extractTokenFromChunk(json: any): string {
     return json.choices[0].message.content;
   }
   return "";
+}
+
+function getFinishError(json: any): string | null {
+  const finishReason = json.choices?.[0]?.finish_reason;
+  if (finishReason == null || finishReason === "stop") return null;
+  return finishReason === "length"
+    ? `AI response was truncated at the ${POLICY_CODEGEN_TOKEN_BUDGET.toLocaleString("en-US")}-token generation budget.`
+    : `AI response ended abnormally with finish reason "${String(finishReason)}".`;
+}
+
+function extractPromptCacheUsage(json: any): PromptCacheUsage | null {
+  const promptTokens = json.usage?.prompt_tokens;
+  const cachedTokens = json.usage?.prompt_tokens_details?.cached_tokens;
+  if (!(promptTokens > 0 || cachedTokens > 0)) return null;
+  return { promptTokens: promptTokens ?? 0, cachedTokens: cachedTokens ?? 0 };
+}
+
+function logPromptCacheUsage(operation: "generate" | "fix", usage: PromptCacheUsage | null): void {
+  if (!usage) return;
+  console.log("[policy-codegen] Workers AI usage", {
+    operation,
+    ...usage,
+  });
 }
 
 function stripMarkdownFences(code: string): string {
@@ -1074,7 +1225,7 @@ function stripMarkdownFences(code: string): string {
 
 /**
  * Unescape string literal escape sequences in AI-generated code.
- * Some models (e.g., Kimi K2.5) output \\n, \\t, etc. as literal
+ * Some models (e.g., the Kimi K2 family) output \\n, \\t, etc. as literal
  * escape sequences in the JSON content instead of actual whitespace.
  * Also handles \\x3C -> < which appears for generics in Rust.
  */
