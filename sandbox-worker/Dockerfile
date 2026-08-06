@@ -16,9 +16,13 @@ RUN rustup target add wasm32-unknown-unknown && rustup target add wasm32v1-none 
 RUN curl -fsSL https://github.com/stellar/stellar-cli/raw/main/install.sh | sh || true
 RUN stellar --version
 
-# Pre-fetch soroban-sdk crate to speed up first compile
+# Pre-fetch soroban-sdk crates to speed up the first compile.
+# These versions MUST match CARGO_TOML_TEMPLATE in src/lib/policy-sandbox.ts.
+# The dev-dependency previously pinned 22 while the template asked for 25.3, so the
+# prefetched testutils crates never matched and every `cargo test` paid a cold
+# download — exactly the cost the `depsFetched` cache in src/index.ts exists to avoid.
 RUN mkdir -p /tmp/prefetch/src && \
-    printf '[package]\nname = "prefetch"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nsoroban-sdk = "25"\n\n[dev-dependencies]\nsoroban-sdk = { version = "22", features = ["testutils"] }\n' > /tmp/prefetch/Cargo.toml && \
+    printf '[package]\nname = "prefetch"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nsoroban-sdk = "25.3"\n\n[dev-dependencies]\nsoroban-sdk = { version = "25.3", features = ["testutils"] }\n' > /tmp/prefetch/Cargo.toml && \
     printf '#![no_std]\nuse soroban_sdk::contract;\n#[contract]\npub struct PrefetchContract;\n' > /tmp/prefetch/src/lib.rs && \
     cd /tmp/prefetch && cargo fetch && \
     rm -rf /tmp/prefetch

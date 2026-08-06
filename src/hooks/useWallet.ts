@@ -59,12 +59,6 @@ function loadEphemeralSigners(): Record<string, string> {
   } catch { return {}; }
 }
 
-function saveEphemeralSigner(publicKey: string, secret: string) {
-  const signers = loadEphemeralSigners();
-  signers[publicKey] = secret;
-  localStorage.setItem(EPHEMERAL_SIGNERS_KEY, JSON.stringify(signers));
-}
-
 export function useWallet() {
   const [wallet, setWallet] = useState<StoredWallet | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
@@ -72,6 +66,8 @@ export function useWallet() {
   /** Lets the UI distinguish in-progress from success from failure, instead of
    *  rendering every message as the same grey line. */
   const [statusKind, setStatusKind] = useState<"idle" | "busy" | "done" | "error">("idle");
+  /** Hash of the last successful transaction, for the explorer link. */
+  const [lastTxHash, setLastTxHash] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [destination, setDestination] = useState("");
@@ -127,6 +123,7 @@ export function useWallet() {
     setLoading(true);
     setStatus("Creating passkey...");
     setStatusKind("busy");
+    setLastTxHash(null);
 
     try {
       const { credentialId, publicKey } = await createPasskey("PollyWallet", "user");
@@ -217,6 +214,7 @@ export function useWallet() {
     setLoading(true);
     setStatus("Requesting testnet XLM...");
     setStatusKind("busy");
+    setLastTxHash(null);
 
     try {
       const tempKeypair = Keypair.random();
@@ -259,6 +257,7 @@ export function useWallet() {
       }
 
       await fetchBalance(wallet.contractId);
+      if (relayerResult.hash) setLastTxHash(relayerResult.hash);
       setStatus("Funded!");
       setStatusKind("done");
     } catch (err: any) {
@@ -274,6 +273,7 @@ export function useWallet() {
     setLoading(true);
     setStatus("Building transfer...");
     setStatusKind("busy");
+    setLastTxHash(null);
 
     try {
       if (!StrKey.isValidEd25519PublicKey(destination) && !StrKey.isValidContract(destination)) {
@@ -453,6 +453,7 @@ export function useWallet() {
       }
 
       await fetchBalance(wallet.contractId);
+      if (relayerResult.hash) setLastTxHash(relayerResult.hash);
       setAmount("");
       setDestination("");
       setStatus("Transfer sent!");
@@ -471,6 +472,7 @@ export function useWallet() {
     setBalance(null);
     setStatus("");
     setStatusKind("idle");
+    setLastTxHash(null);
   };
 
   const handleCopy = () => {
@@ -482,11 +484,11 @@ export function useWallet() {
   };
 
   return {
-    wallet, balance, status, statusKind, loading, copied, destination, amount,
+    wallet, balance, status, statusKind, lastTxHash, loading, copied, destination, amount,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
-    fetchRules, saveEphemeralSigner,
+    fetchRules,
   };
 }
 

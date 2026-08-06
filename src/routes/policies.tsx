@@ -481,7 +481,9 @@ function PolicyBuilder() {
     } finally {
       setLoading(false);
     }
-  }, [wasmBase64]);
+    // schema and generatedCode are read above — without them here the KV record
+    // is written from whatever they were when wasmBase64 last changed.
+  }, [wasmBase64, schema, generatedCode]);
 
   // --- Step 5 Handlers ---
 
