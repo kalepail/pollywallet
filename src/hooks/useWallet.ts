@@ -69,6 +69,9 @@ export function useWallet() {
   const [wallet, setWallet] = useState<StoredWallet | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
   const [status, setStatus] = useState("");
+  /** Lets the UI distinguish in-progress from success from failure, instead of
+   *  rendering every message as the same grey line. */
+  const [statusKind, setStatusKind] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [destination, setDestination] = useState("");
@@ -123,6 +126,7 @@ export function useWallet() {
   const handleCreate = async () => {
     setLoading(true);
     setStatus("Creating passkey...");
+    setStatusKind("busy");
 
     try {
       const { credentialId, publicKey } = await createPasskey("PollyWallet", "user");
@@ -198,9 +202,11 @@ export function useWallet() {
       saveWallet(walletData);
       setWallet(walletData);
       setStatus("Wallet created!");
+      setStatusKind("done");
     } catch (err: any) {
       console.error("Create wallet error:", err);
-      setStatus(`Error: ${err.message}`);
+      setStatus(err.message || "Something went wrong");
+      setStatusKind("error");
     } finally {
       setLoading(false);
     }
@@ -210,6 +216,7 @@ export function useWallet() {
     if (!wallet) return;
     setLoading(true);
     setStatus("Requesting testnet XLM...");
+    setStatusKind("busy");
 
     try {
       const tempKeypair = Keypair.random();
@@ -253,8 +260,10 @@ export function useWallet() {
 
       await fetchBalance(wallet.contractId);
       setStatus("Funded!");
+      setStatusKind("done");
     } catch (err: any) {
-      setStatus(`Error: ${err.message}`);
+      setStatus(err.message || "Something went wrong");
+      setStatusKind("error");
     } finally {
       setLoading(false);
     }
@@ -264,6 +273,7 @@ export function useWallet() {
     if (!wallet || !destination || !amount) return;
     setLoading(true);
     setStatus("Building transfer...");
+    setStatusKind("busy");
 
     try {
       if (!StrKey.isValidEd25519PublicKey(destination) && !StrKey.isValidContract(destination)) {
@@ -446,8 +456,10 @@ export function useWallet() {
       setAmount("");
       setDestination("");
       setStatus("Transfer sent!");
+      setStatusKind("done");
     } catch (err: any) {
-      setStatus(`Error: ${err.message}`);
+      setStatus(err.message || "Something went wrong");
+      setStatusKind("error");
     } finally {
       setLoading(false);
     }
@@ -458,6 +470,7 @@ export function useWallet() {
     setWallet(null);
     setBalance(null);
     setStatus("");
+    setStatusKind("idle");
   };
 
   const handleCopy = () => {
@@ -469,7 +482,7 @@ export function useWallet() {
   };
 
   return {
-    wallet, balance, status, loading, copied, destination, amount,
+    wallet, balance, status, statusKind, loading, copied, destination, amount,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,

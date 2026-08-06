@@ -1,12 +1,43 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useWallet } from "../hooks/useWallet";
-import { Wallet, Plus, Send, Coins, LogOut, Copy, Check, Loader2 } from "lucide-react";
+import { Wallet, Plus, Send, Coins, LogOut, Copy, Check, Loader2, CircleAlert, CircleCheck } from "lucide-react";
 
 export const Route = createFileRoute("/")({ component: App });
 
+/**
+ * Status was previously one grey line for every message, so "Sign with your
+ * passkey..." and a hard failure looked identical — and these operations take
+ * 10-60s. Colour + icon per state, the way Deel reports payment status.
+ */
+function StatusPanel({ status, kind }: { status: string; kind: "idle" | "busy" | "done" | "error" }) {
+  if (!status) return null;
+
+  const styles = {
+    busy: "bg-slate-800/60 border-slate-700 text-gray-300",
+    done: "bg-emerald-500/10 border-emerald-500/30 text-emerald-300",
+    error: "bg-red-500/10 border-red-500/30 text-red-300",
+    idle: "bg-slate-800/60 border-slate-700 text-gray-300",
+  }[kind];
+
+  const icon = kind === "error" ? <CircleAlert className="w-4 h-4 shrink-0" />
+    : kind === "done" ? <CircleCheck className="w-4 h-4 shrink-0" />
+    : <Loader2 className="w-4 h-4 shrink-0 animate-spin" />;
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm ${styles}`}
+    >
+      {icon}
+      <span className="break-words">{status}</span>
+    </div>
+  );
+}
+
 function App() {
   const {
-    wallet, balance, status, loading, copied, destination, amount,
+    wallet, balance, status, statusKind, loading, copied, destination, amount,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
@@ -29,7 +60,9 @@ function App() {
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
             Create Smart Wallet
           </button>
-          {status && <p className="mt-4 text-sm text-center text-gray-400">{status}</p>}
+          <div className="mt-4">
+            <StatusPanel status={status} kind={statusKind} />
+          </div>
         </div>
       </div>
     );
@@ -66,12 +99,33 @@ function App() {
             Send XLM
           </h2>
           <div className="space-y-3">
-            <input type="text" placeholder="Destination (G... or C...)" value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-              className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />
-            <input type="number" placeholder="Amount (XLM)" value={amount}
-              onChange={(e) => setAmount(e.target.value)} step="any" min="0"
-              className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />
+            <div>
+              <label htmlFor="destination" className="block text-xs text-gray-400 mb-1">
+                Destination
+              </label>
+              <input id="destination" type="text" placeholder="G... or C..." value={destination}
+                onChange={(e) => setDestination(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />
+            </div>
+            <div>
+              <div className="flex items-baseline justify-between mb-1">
+                <label htmlFor="amount" className="block text-xs text-gray-400">
+                  Amount (XLM)
+                </label>
+                {balance != null && (
+                  <button
+                    type="button"
+                    onClick={() => setAmount(balance)}
+                    className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
+                  >
+                    Max: {balance}
+                  </button>
+                )}
+              </div>
+              <input id="amount" type="number" placeholder="0.00" value={amount}
+                onChange={(e) => setAmount(e.target.value)} step="any" min="0"
+                className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />
+            </div>
 
             {/* Signing method: passkey (default) or policy-enforced rule */}
             {(() => {
@@ -149,7 +203,7 @@ function App() {
           </div>
         </div>
 
-        {status && <p className="text-sm text-center text-gray-400">{status}</p>}
+        <StatusPanel status={status} kind={statusKind} />
 
         <button onClick={handleDisconnect}
           className="w-full flex items-center justify-center gap-2 px-6 py-3 text-gray-400 hover:text-red-400 transition-colors"
