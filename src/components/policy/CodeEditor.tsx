@@ -2,7 +2,7 @@ import { Code, PencilSimple, Eye, Lightning, Hash, FileText, Copy, Check } from 
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { useState, useEffect, useRef, useCallback } from "react";
-import { codeToHtml } from "shiki";
+import { highlightRust } from "@/lib/highlight";
 
 interface StreamStats {
   tokenCount: number;
@@ -52,13 +52,9 @@ export default function CodeEditor({
     }
 
     let cancelled = false;
-    codeToHtml(code, {
-      lang: "rust",
-      theme: "vesper",
-    }).then((html) => {
+    highlightRust(code).then((html) => {
+      // null on failure — the plain-text <pre> fallback renders instead.
       if (!cancelled) setHighlightedHtml(html);
-    }).catch(() => {
-      // Shiki failed — fallback to plain text
     });
 
     return () => { cancelled = true; };

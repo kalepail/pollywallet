@@ -7,7 +7,7 @@ vi.mock("@tanstack/react-start", () => ({
   }),
 }));
 
-import { schemaFromPatterns, schemaToJSON, type TxPattern } from "../policy-schema";
+import { schemaFromPatterns, type TxPattern } from "../policy-schema";
 import { buildUserPrompt } from "../policy-codegen";
 
 const executePattern: TxPattern = {

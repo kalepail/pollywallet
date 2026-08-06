@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
+import { MAX_XDR_LENGTH, MAX_AUTH_ENTRIES } from "./relayer";
 
 // --- Types ---
 
@@ -341,7 +342,16 @@ function validateRelayerSubmitInput(data: unknown): RelayerSubmitInput {
   if (typeof data !== "object" || data === null) throw new Error("Invalid payload");
   const d = data as Record<string, unknown>;
   if (typeof d.func !== "string" || !d.func) throw new Error("func required");
-  if (!Array.isArray(d.auth)) throw new Error("auth required");
+  if (d.func.length > MAX_XDR_LENGTH) {
+    throw new Error("Invalid func: must be under 100KB");
+  }
+  if (
+    !Array.isArray(d.auth) ||
+    d.auth.length > MAX_AUTH_ENTRIES ||
+    !d.auth.every((a) => typeof a === "string" && a.length <= MAX_XDR_LENGTH)
+  ) {
+    throw new Error(`Invalid auth: must be an array of up to ${MAX_AUTH_ENTRIES} strings under 100KB each`);
+  }
   return { func: d.func as string, auth: d.auth as string[] };
 }
 

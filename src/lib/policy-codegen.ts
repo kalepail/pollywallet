@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
-import type { PolicySchema, ArgPermission } from "./policy-schema";
+import type { PolicySchema } from "./policy-schema";
 import { schemaToJSON, validateSchema } from "./policy-schema";
 
 // --- Reference source code embedded as constants ---
@@ -774,93 +774,6 @@ function validateFixInput(data: unknown): FixInput {
   return { rustCode, compileErrors };
 }
 
-/**
- * Server function that calls Cloudflare Workers AI (Kimi K2.5) to generate
- * a Rust/Soroban policy contract from a policy schema.
- *
- * Returns the generated Rust source code as a string.
- * For streaming, the caller should use EventSource or fetch with streaming.
- */
-export const generatePolicyCode = createServerFn({ method: "POST" })
-  .inputValidator(validateGenerateInput)
-  .handler(async ({ data }) => {
-    const { schemaJson } = data;
-
-    // Parse and validate the schema
-    // We import inline to avoid pulling bigint-heavy code into validation
-    const { schemaFromJSON, validateSchema: validate } = await import("./policy-schema");
-    const schema = schemaFromJSON(schemaJson);
-    const validation = validate(schema);
-    if (!validation.valid) {
-      return {
-        success: false as const,
-        error: `Schema validation failed: ${validation.errors.join("; ")}`,
-        code: null,
-      };
-    }
-
-    // Build the prompt
-    const systemPrompt = buildSystemPrompt();
-    const userPrompt = buildUserPrompt(schema);
-
-    // Access Workers AI binding via cloudflare:workers import
-    const ai = env.AI;
-    if (!ai) {
-      return {
-        success: false as const,
-        error: "Workers AI binding not available. Ensure AI binding is configured in wrangler.jsonc.",
-        code: null,
-      };
-    }
-
-    try {
-      // Use streaming to avoid 504 timeouts on large code generation.
-      // Kimi K2.5 with a big system prompt can take 30-60s — streaming
-      // keeps the connection alive by sending tokens incrementally.
-      const stream = (await ai.run("@cf/moonshotai/kimi-k2.5", {
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        stream: true,
-        max_tokens: 16384,
-        temperature: 0.1,
-        // Disable reasoning/thinking for faster output — the reference
-        // implementations are explicit enough that thinking isn't needed.
-        chat_template_kwargs: {
-          enable_thinking: false,
-        },
-      })) as ReadableStream;
-
-      // Collect all streamed tokens server-side
-      const code = await collectStreamedResponse(stream);
-
-      if (!code) {
-        return {
-          success: false as const,
-          error: "AI model returned empty response",
-          code: null,
-        };
-      }
-
-      // Unescape literal escape sequences from model output, then strip
-      // any markdown fences the model might add despite instructions
-      const cleanCode = stripMarkdownFences(unescapeCodeContent(code));
-
-      return {
-        success: true as const,
-        error: null,
-        code: cleanCode,
-      };
-    } catch (err: any) {
-      return {
-        success: false as const,
-        error: err.message || "AI code generation failed",
-        code: null,
-      };
-    }
-  });
-
 // --- Streaming Server Function (async generator) ---
 
 /** Chunk type sent from server to client during streaming generation. */
@@ -1052,31 +965,6 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
 // --- Client-side convenience ---
 
 /**
- * Client-side wrapper that prepares the schema and calls the server function.
- * Returns the complete code (non-streaming).
- */
-export async function requestPolicyGeneration(schema: PolicySchema): Promise<{
-  success: boolean;
-  error: string | null;
-  code: string | null;
-}> {
-  const validation = validateSchema(schema);
-  if (!validation.valid) {
-    return {
-      success: false,
-      error: `Schema validation failed: ${validation.errors.join("; ")}`,
-      code: null,
-    };
-  }
-
-  const result = await generatePolicyCode({
-    data: { schemaJson: schemaToJSON(schema) },
-  });
-
-  return result;
-}
-
-/**
  * Client-side streaming wrapper. Returns an async iterable of GenerateChunks.
  * Use `for await...of` to consume tokens as they arrive.
  */
@@ -1147,52 +1035,6 @@ export async function requestFixCode(
 }
 
 // --- Helpers ---
-
-/**
- * Read a Workers AI SSE stream and collect the full text response.
- * Handles both legacy Workers AI format ("response" field) and
- * OpenAI-compatible format ("choices[0].delta.content" field).
- * SSE format: "data: {...}\n\n" ... "data: [DONE]\n\n"
- */
-async function collectStreamedResponse(stream: ReadableStream): Promise<string> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let result = "";
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-
-    // Process complete SSE lines
-    const lines = buffer.split("\n");
-    // Keep the last potentially incomplete line in the buffer
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
-      try {
-        const json = JSON.parse(trimmed.slice(6));
-        result += extractTokenFromChunk(json);
-      } catch {
-        // Skip malformed JSON chunks
-      }
-    }
-  }
-
-  // Process any remaining buffer
-  if (buffer.trim().startsWith("data: ") && buffer.trim() !== "data: [DONE]") {
-    try {
-      const json = JSON.parse(buffer.trim().slice(6));
-      result += extractTokenFromChunk(json);
-    } catch {}
-  }
-
-  return result;
-}
 
 /**
  * Extract the token text from a streaming chunk, supporting both

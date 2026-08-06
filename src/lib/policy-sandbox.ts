@@ -1,7 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
 import type { PolicySchema, ArgPermission } from "./policy-schema";
-import { schemaToJSON } from "./policy-schema";
 
 declare module "cloudflare:workers" {
   interface Env {

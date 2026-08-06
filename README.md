@@ -108,7 +108,13 @@ The app derives a deterministic contract address from:
 
 ### 3. Deploy via server function
 
-The browser builds an unsigned deployment transaction, then sends it to a TanStack server function. The server function reconstructs the deployer keypair, simulates the transaction, signs it, and submits it through the Channels relayer.
+The browser builds the deployment transaction, simulates it against Soroban RPC, and assembles the prepared transaction. It then sends that prepared transaction to a TanStack server function, which reconstructs the deployer keypair, signs, and submits through the Channels relayer.
+
+Simulation deliberately happens in the browser rather than server-side. Local `workerd`
+cannot reach `soroban-testnet.stellar.org` or `friendbot.stellar.org` — both fail with
+`internal error; reference = ...` — so simulating inside the server function made wallet
+creation fail under `pnpm dev` even though it worked once deployed. The server function now
+does only the part that needs the secret: signing.
 
 ### 4. Funding
 
@@ -152,13 +158,33 @@ The default test target is `http://localhost:3000`, and the script exercises cre
 
 ## Deployment
 
-Deployments target Cloudflare through Wrangler:
+Deployments target Cloudflare through Wrangler. There are **two** Workers, and the order
+matters: the main Worker has a `SANDBOX` service binding to `pollywallet-sandbox`, so
+deploying it first fails with `Service binding 'SANDBOX' references Worker
+'pollywallet-sandbox' which was not found`.
+
+On a fresh account:
 
 ```bash
-pnpm deploy
+pnpm run build                                          # builds both Workers into dist/
+npx wrangler deploy -c dist/pollywallet_sandbox/wrangler.json   # 1. sandbox (container)
+npx wrangler deploy                                     # 2. main app
+npx wrangler secret put CHANNELS_API_KEY                # 3. relayer key
 ```
 
-Before deploying, make sure the relevant Worker secret is configured for the target environment. For local development this is typically `.dev.vars`; for deployed environments use Wrangler secrets or environment configuration appropriate to your setup.
+Once both Workers exist, `pnpm deploy` handles subsequent updates.
+
+Notes:
+
+- The sandbox Worker is a **container** Worker (Rust toolchain + `stellar-cli`). Its first
+  deploy builds and pushes an image (~700 MB) and takes several minutes.
+- It runs on `standard-2` (1 vCPU / 6 GiB / 12 GB). Smaller instance types cannot compile a
+  Soroban contract — `lite` only has 256 MiB of memory and 2 GB of disk.
+- It sets `workers_dev: false` on purpose. Its `/compile` and `/test` endpoints have no auth
+  of their own, so it is reachable only through the main Worker's service binding.
+- The relayer key must be a Worker **secret**; `.dev.vars` only covers local development.
+- A newly set secret takes a moment to propagate — a deploy flow run immediately after
+  `secret put` can still hit the previous version and report `Relayer not configured`.
 
 ## Security Caveats
 

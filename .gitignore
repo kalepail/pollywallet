@@ -17,5 +17,6 @@ todos.json
 !.env.example
 
 .claude/
+solo.yml
 e2e-policy-test/target/
 e2e-policy-test/test_snapshots/
