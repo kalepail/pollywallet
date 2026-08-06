@@ -796,6 +796,9 @@ export interface GenerateChunk {
   reasoningCount?: number;
 }
 
+const POLICY_CODEGEN_TOKEN_BUDGET = 16_384;
+type PromptCacheUsage = { promptTokens: number; cachedTokens: number };
+
 /**
  * Streaming server function using async generator.
  * Yields GenerateChunks as tokens arrive from Workers AI.
@@ -833,7 +836,7 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
           { role: "user", content: userPrompt },
         ],
         stream: true,
-        max_tokens: 16384,
+        max_tokens: POLICY_CODEGEN_TOKEN_BUDGET,
         temperature: 0.1,
         // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
         // endpoint — the default splits reasoning into `delta.reasoning_content` (which
@@ -845,6 +848,8 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
       const reader = aiStream.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = "";
+      let sawTerminalMarker = false;
+      let cacheUsage: PromptCacheUsage | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -856,9 +861,21 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
+          if (trimmed === "data: [DONE]") {
+            sawTerminalMarker = true;
+            continue;
+          }
+          if (!trimmed.startsWith("data: ")) continue;
           try {
             const json = JSON.parse(trimmed.slice(6));
+            cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+            if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+            const finishError = getFinishError(json);
+            if (finishError) {
+              logPromptCacheUsage("generate", cacheUsage);
+              yield { type: "error", text: finishError };
+              return;
+            }
             // Reasoning is streamed for UI progress only — never into codeBuffer.
             const reasoning = extractReasoningFromChunk(json);
             if (reasoning) {
@@ -878,9 +895,20 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
       }
 
       // Flush any remaining buffer content
-      if (sseBuffer.trim().startsWith("data: ") && sseBuffer.trim() !== "data: [DONE]") {
+      const trailing = sseBuffer.trim();
+      if (trailing === "data: [DONE]") {
+        sawTerminalMarker = true;
+      } else if (trailing.startsWith("data: ")) {
         try {
-          const json = JSON.parse(sseBuffer.trim().slice(6));
+          const json = JSON.parse(trailing.slice(6));
+          cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+          if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+          const finishError = getFinishError(json);
+          if (finishError) {
+            logPromptCacheUsage("generate", cacheUsage);
+            yield { type: "error", text: finishError };
+            return;
+          }
           const token = extractTokenFromChunk(json);
           if (token) {
             tokenCount++;
@@ -889,6 +917,12 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
         } catch {
           // Skip malformed final chunk
         }
+      }
+
+      logPromptCacheUsage("generate", cacheUsage);
+      if (!sawTerminalMarker) {
+        yield { type: "error", text: "AI response stream ended before a terminal marker was received." };
+        return;
       }
 
       // Clean and yield final result
@@ -931,7 +965,7 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
           { role: "user", content: fixPrompt },
         ],
         stream: true,
-        max_tokens: 16384,
+        max_tokens: POLICY_CODEGEN_TOKEN_BUDGET,
         temperature: 0.1,
         // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
         // endpoint — the default splits reasoning into `delta.reasoning_content` (which
@@ -943,6 +977,8 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
       const reader = aiStream.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = "";
+      let sawTerminalMarker = false;
+      let cacheUsage: PromptCacheUsage | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -954,9 +990,21 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") continue;
+          if (trimmed === "data: [DONE]") {
+            sawTerminalMarker = true;
+            continue;
+          }
+          if (!trimmed.startsWith("data: ")) continue;
           try {
             const json = JSON.parse(trimmed.slice(6));
+            cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+            if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+            const finishError = getFinishError(json);
+            if (finishError) {
+              logPromptCacheUsage("fix", cacheUsage);
+              yield { type: "error", text: finishError };
+              return;
+            }
             // Reasoning is streamed for UI progress only — never into codeBuffer.
             const reasoning = extractReasoningFromChunk(json);
             if (reasoning) {
@@ -976,15 +1024,32 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
       }
 
       // Flush remaining buffer
-      if (sseBuffer.trim().startsWith("data: ") && sseBuffer.trim() !== "data: [DONE]") {
+      const trailing = sseBuffer.trim();
+      if (trailing === "data: [DONE]") {
+        sawTerminalMarker = true;
+      } else if (trailing.startsWith("data: ")) {
         try {
-          const json = JSON.parse(sseBuffer.trim().slice(6));
+          const json = JSON.parse(trailing.slice(6));
+          cacheUsage = extractPromptCacheUsage(json) ?? cacheUsage;
+          if (json.choices?.[0]?.finish_reason === "stop") sawTerminalMarker = true;
+          const finishError = getFinishError(json);
+          if (finishError) {
+            logPromptCacheUsage("fix", cacheUsage);
+            yield { type: "error", text: finishError };
+            return;
+          }
           const token = extractTokenFromChunk(json);
           if (token) {
             tokenCount++;
             codeBuffer += token;
           }
         } catch {}
+      }
+
+      logPromptCacheUsage("fix", cacheUsage);
+      if (!sawTerminalMarker) {
+        yield { type: "error", text: "AI response stream ended before a terminal marker was received." };
+        return;
       }
 
       const cleanCode = stripMarkdownFences(unescapeCodeContent(codeBuffer));
@@ -1117,6 +1182,29 @@ export function extractTokenFromChunk(json: any): string {
     return json.choices[0].message.content;
   }
   return "";
+}
+
+function getFinishError(json: any): string | null {
+  const finishReason = json.choices?.[0]?.finish_reason;
+  if (finishReason == null || finishReason === "stop") return null;
+  return finishReason === "length"
+    ? `AI response was truncated at the ${POLICY_CODEGEN_TOKEN_BUDGET.toLocaleString("en-US")}-token generation budget.`
+    : `AI response ended abnormally with finish reason "${String(finishReason)}".`;
+}
+
+function extractPromptCacheUsage(json: any): PromptCacheUsage | null {
+  const promptTokens = json.usage?.prompt_tokens;
+  const cachedTokens = json.usage?.prompt_tokens_details?.cached_tokens;
+  if (!(promptTokens > 0 || cachedTokens > 0)) return null;
+  return { promptTokens: promptTokens ?? 0, cachedTokens: cachedTokens ?? 0 };
+}
+
+function logPromptCacheUsage(operation: "generate" | "fix", usage: PromptCacheUsage | null): void {
+  if (!usage) return;
+  console.log("[policy-codegen] Workers AI usage", {
+    operation,
+    ...usage,
+  });
 }
 
 function stripMarkdownFences(code: string): string {

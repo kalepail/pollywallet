@@ -1,16 +1,22 @@
 import { describe, it, expect, vi } from "vitest";
 
+const aiRun = vi.hoisted(() => vi.fn());
+
 vi.mock("@tanstack/react-start", () => ({
   createServerFn: () => ({
     inputValidator: () => ({ handler: (fn: any) => fn }),
   }),
 }));
 
+vi.mock("cloudflare:workers", () => ({ env: { AI: { run: aiRun } } }));
+
 import {
   buildSystemPrompt,
   buildUserPrompt,
   extractTokenFromChunk,
   extractReasoningFromChunk,
+  streamPolicyCode,
+  fixPolicyCode,
 } from "../policy-codegen";
 import { schemaFromPatterns, type PolicySchema, type TxPattern, SCHEMA_VERSION } from "../policy-schema";
 
@@ -151,5 +157,125 @@ describe("extractReasoningFromChunk: reasoning is streamed but stays separate", 
   it("reads the `reasoning` field name too, per the K2.6+ changelog", () => {
     expect(extractReasoningFromChunk({ choices: [{ delta: { reasoning: "hm" } }] })).toBe("hm");
     expect(extractReasoningFromChunk({ choices: [{ delta: { content: "code" } }] })).toBe("");
+  });
+});
+
+describe("streaming truncation", () => {
+  const schema: PolicySchema = {
+    $schema: SCHEMA_VERSION,
+    name: "truncation-test",
+    description: "Test policy",
+    contracts: [{ address: "CTEST", functions: [{ name: "test", args: [] }] }],
+    globalRules: [],
+  };
+  const truncationError = "AI response was truncated at the 16,384-token generation budget.";
+  const missingTerminalError = "AI response stream ended before a terminal marker was received.";
+
+  function requests() {
+    return [
+      () => streamPolicyCode({ data: { schemaJson: JSON.stringify(schema) } }),
+      () => fixPolicyCode({ data: { rustCode: "partial", compileErrors: "error" } }),
+    ];
+  }
+
+  async function expectErrorFromBoth(sse: string, error: string) {
+    for (const request of requests()) {
+      aiRun.mockResolvedValueOnce(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(sse));
+          controller.close();
+        },
+      }));
+
+      const chunks = [];
+      for await (const chunk of await request()) chunks.push(chunk);
+
+      expect(chunks).toContainEqual({ type: "error", text: error });
+      expect(chunks).not.toContainEqual(expect.objectContaining({ type: "done" }));
+    }
+  }
+
+  it("returns an error instead of done-with-partial-code from both codegen streams", async () => {
+    const sse = [
+      `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "thinking" }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "partial Rust" }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+
+    await expectErrorFromBoth(sse, truncationError);
+  });
+
+  it("rejects streams that end without a terminal marker", async () => {
+    const sse = [
+      `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "thinking" }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "partial Rust" }, finish_reason: null }] })}`,
+      "",
+    ].join("\n\n");
+
+    await expectErrorFromBoth(sse, missingTerminalError);
+  });
+
+  it("checks a trailing length frame without a newline", async () => {
+    const sse = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "partial Rust" }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] })}`,
+    ].join("\n\n");
+
+    await expectErrorFromBoth(sse, truncationError);
+  });
+
+  it("rejects other abnormal finish reasons", async () => {
+    const sse = [
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "content_filter" }] })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+
+    await expectErrorFromBoth(
+      sse,
+      "AI response ended abnormally with finish reason \"content_filter\".",
+    );
+  });
+
+  it("logs cache usage from the usage-only frame after stop", async () => {
+    const sse = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "complete Rust" }, finish_reason: null }], usage: { prompt_tokens: 6840, prompt_tokens_details: { cached_tokens: 0 } } })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } })}`,
+      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 6840, prompt_tokens_details: { cached_tokens: 6784 } } })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      for (const request of requests()) {
+        aiRun.mockResolvedValueOnce(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(sse));
+            controller.close();
+          },
+        }));
+
+        const chunks = [];
+        for await (const chunk of await request()) chunks.push(chunk);
+        expect(chunks).toContainEqual(expect.objectContaining({ type: "done" }));
+      }
+
+      expect(consoleLog).toHaveBeenCalledTimes(2);
+      expect(consoleLog).toHaveBeenCalledWith("[policy-codegen] Workers AI usage", {
+        operation: "generate",
+        promptTokens: 6840,
+        cachedTokens: 6784,
+      });
+      expect(consoleLog).toHaveBeenCalledWith("[policy-codegen] Workers AI usage", {
+        operation: "fix",
+        promptTokens: 6840,
+        cachedTokens: 6784,
+      });
+    } finally {
+      consoleLog.mockRestore();
+    }
   });
 });
