@@ -1,4 +1,4 @@
-FROM docker.io/cloudflare/sandbox:0.8.7
+FROM docker.io/cloudflare/sandbox:0.12.4
 
 # Install build tools and runtime deps for stellar-cli and Rust compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,7 +22,7 @@ RUN stellar --version
 # prefetched testutils crates never matched and every `cargo test` paid a cold
 # download — exactly the cost the `depsFetched` cache in src/index.ts exists to avoid.
 RUN mkdir -p /tmp/prefetch/src && \
-    printf '[package]\nname = "prefetch"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nsoroban-sdk = "25.3"\n\n[dev-dependencies]\nsoroban-sdk = { version = "25.3", features = ["testutils"] }\n' > /tmp/prefetch/Cargo.toml && \
+    printf '[package]\nname = "prefetch"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nsoroban-sdk = "27.0.5"\n\n[dev-dependencies]\nsoroban-sdk = { version = "27.0.5", features = ["testutils"] }\n' > /tmp/prefetch/Cargo.toml && \
     printf '#![no_std]\nuse soroban_sdk::contract;\n#[contract]\npub struct PrefetchContract;\n' > /tmp/prefetch/src/lib.rs && \
     cd /tmp/prefetch && cargo fetch && \
     rm -rf /tmp/prefetch

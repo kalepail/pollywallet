@@ -36,7 +36,7 @@ The policy builder feature uses several Cloudflare services together:
 ### Cloudflare Sandbox — Policy Testing
 
 - SDK: `@cloudflare/sandbox` (match npm version to Docker image tag)
-- Base image: `docker.io/cloudflare/sandbox:0.8.7` (must match the `@cloudflare/sandbox` npm version)
+- Base image: `docker.io/cloudflare/sandbox:0.12.4` (must match the `@cloudflare/sandbox` npm version)
 - Custom Dockerfile: extend base image, preinstall Rust toolchain + stellar-cli
 - Use WebSocket transport (`SANDBOX_TRANSPORT=websocket`) to avoid subrequest limits
 - Instance types for Rust compilation:
@@ -72,6 +72,14 @@ Policies implement the `Policy` trait with three methods:
 - `uninstall()` — cleans up storage when removed
 
 Storage is keyed by `(smart_account_address, context_rule_id)`. Multiple policies on a rule use AND semantics. Reference implementations are in `stellar-contracts/packages/accounts/src/policies/`.
+
+## Protocol
+
+- Stellar testnet runs **Protocol 27** (verify with RPC `getVersionInfo`).
+- `@stellar/stellar-sdk` **16.x** is the Protocol 27 line; 15.x is Protocol 26.
+- Rust `soroban-sdk` major tracks the protocol: use **27.x** for Protocol 27.
+  It is pinned in two places that must stay in sync — `CARGO_TOML_TEMPLATE`
+  (`src/lib/policy-sandbox.ts`) and the prefetch in `sandbox-worker/Dockerfile`.
 
 ## Environment
 
