@@ -3,6 +3,11 @@
 	"compatibility_date": "2025-09-02",
 	"compatibility_flags": ["nodejs_compat"],
 	"main": "src/index.ts",
+	// Reachable only through the main Worker's SANDBOX service binding. Left on
+	// workers.dev, anyone could POST /compile or /test and burn container CPU
+	// compiling arbitrary Rust — the endpoints have no auth of their own.
+	"workers_dev": false,
+	"preview_urls": false,
 	"containers": [
 		{
 			"class_name": "Sandbox",

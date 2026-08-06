@@ -36,13 +36,19 @@ The policy builder feature uses several Cloudflare services together:
 ### Cloudflare Sandbox — Policy Testing
 
 - SDK: `@cloudflare/sandbox` (match npm version to Docker image tag)
-- Base image: `docker.io/cloudflare/sandbox:0.7.0`
+- Base image: `docker.io/cloudflare/sandbox:0.8.7` (must match the `@cloudflare/sandbox` npm version)
 - Custom Dockerfile: extend base image, preinstall Rust toolchain + stellar-cli
 - Use WebSocket transport (`SANDBOX_TRANSPORT=websocket`) to avoid subrequest limits
 - Instance types for Rust compilation:
-  - `standard-2` (1 vCPU, 6 GiB RAM, 12 GB disk) — recommended for Rust builds
+  - `standard-2` (1 vCPU, 6 GiB RAM, 12 GB disk) — what this project uses
   - Custom: up to 4 vCPU, 12 GiB RAM, 20 GB disk
+  - Do NOT use `lite` (1/16 vCPU, 256 MiB, 2 GB): the image alone is ~728 MB and
+    rustc cannot build a Soroban contract in 256 MiB
 - Key APIs: `exec()`, `writeFile()`, `readFile()`, `mkdir()`, `execStream()`
+- Each request gets its own `/workspace/policy-<uuid>` directory. `CARGO_TARGET_DIR`
+  is shared so the crate cache stays warm; cargo's lock serializes concurrent builds.
+- The sandbox Worker sets `workers_dev: false` — its endpoints have no auth, so it is
+  reachable only through the main Worker's `SANDBOX` service binding.
 - Sandbox Dockerfile should preinstall:
   - Rust toolchain (rustup + wasm32 target)
   - `stellar-cli`
