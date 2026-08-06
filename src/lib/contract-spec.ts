@@ -1,4 +1,3 @@
-import { createServerFn } from "@tanstack/react-start";
 import { xdr, Address, contract } from "@stellar/stellar-sdk";
 import { TESTNET_RPC_URL } from "./constants";
 
@@ -407,25 +406,24 @@ function validateSpecInput(data: unknown): SpecInput {
   return { contractAddress };
 }
 
-export const getContractSpec = createServerFn({ method: "POST" })
-  .inputValidator(validateSpecInput)
-  .handler(async ({ data }) => {
-    try {
-      const spec = await extractContractSpec(data.contractAddress);
-      return { success: true as const, spec, error: null };
-    } catch (err: any) {
-      return {
-        success: false as const,
-        spec: null,
-        error: err.message || "Failed to fetch contract spec",
-      };
-    }
-  });
-
-// --- Client-side convenience ---
-
+/**
+ * Fetch and parse a contract's spec. Runs entirely client-side — it is read-only
+ * RPC with no secrets, same as `context-rules.ts`. It must not be a server function:
+ * local workerd cannot reach soroban-testnet.stellar.org, which broke the policy
+ * builder's "fetch spec" step under `pnpm dev`.
+ */
 export async function requestContractSpec(
   contractAddress: string
 ): Promise<{ success: boolean; spec: ContractSpec | null; error: string | null }> {
-  return getContractSpec({ data: { contractAddress } });
+  try {
+    const { contractAddress: addr } = validateSpecInput({ contractAddress });
+    const spec = await extractContractSpec(addr);
+    return { success: true, spec, error: null };
+  } catch (err: any) {
+    return {
+      success: false,
+      spec: null,
+      error: err.message || "Failed to fetch contract spec",
+    };
+  }
 }

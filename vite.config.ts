@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite'
-import tsconfigPaths from 'vite-tsconfig-paths'
 import { tanstackStart } from '@tanstack/react-start/plugin/vite'
 import viteReact from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -14,6 +13,7 @@ export default defineConfig({
     alias: {
       buffer: fileURLToPath(new URL('./node_modules/buffer/index.js', import.meta.url)),
     },
+    tsconfigPaths: true,
     preserveSymlinks: false,
     dedupe: ['@stellar/stellar-sdk', '@stellar/stellar-base'],
   },
@@ -48,7 +48,6 @@ export default defineConfig({
       viteEnvironment: { name: 'ssr' },
       auxiliaryWorkers: [{ configPath: './sandbox-worker/wrangler.jsonc' }],
     }),
-    tsconfigPaths({ projects: ['./tsconfig.json'] }),
     tailwindcss(),
     tanstackStart(),
     viteReact(),

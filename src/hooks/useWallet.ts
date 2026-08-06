@@ -154,8 +154,18 @@ export function useWallet() {
 
       setStatus("Preparing deploy...");
 
-      // Build unsigned transaction — signing happens server-side
-      const sourceAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
+      // Simulate + assemble here in the browser. The server function only signs and
+      // submits: local workerd cannot reach soroban-testnet.stellar.org, so keeping
+      // simulation server-side broke wallet creation under `pnpm dev`.
+      let sourceAccount;
+      try {
+        sourceAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
+      } catch {
+        // Fresh testnet (or post-reset): fund the shared deployer once, then retry.
+        await fetch(`${FRIENDBOT_URL}?addr=${DEPLOYER_PUBLIC_KEY}`);
+        sourceAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
+      }
+
       const unsignedTx = new TransactionBuilder(sourceAccount, {
         fee: "100",
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
@@ -164,8 +174,16 @@ export function useWallet() {
         .setTimeout(30)
         .build();
 
+      const deploySim = await server.simulateTransaction(unsignedTx);
+      if ("error" in deploySim) {
+        throw new Error(`Simulation failed: ${(deploySim as any).error}`);
+      }
+      const preparedTx = rpc
+        .assembleTransaction(unsignedTx, deploySim as rpc.Api.SimulateTransactionSuccessResponse)
+        .build();
+
       setStatus("Deploying via relayer...");
-      const deployResult = await signAndSubmitDeploy({ data: { unsignedXdr: unsignedTx.toXDR() } });
+      const deployResult = await signAndSubmitDeploy({ data: { preparedXdr: preparedTx.toXDR() } });
       if (!deployResult.success) throw new Error(deployResult.error || "Deploy failed");
 
       if (deployResult.hash) {

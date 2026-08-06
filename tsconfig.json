@@ -1,10 +1,13 @@
 {
   "include": ["**/*.ts", "**/*.tsx"],
+  // bindings/ is a workspace package with its own tsconfig + build; e2e-policy-test
+  // and dist are not app sources. Without this the root typecheck reports errors for
+  // generated bindings code under settings that package never opted into.
+  "exclude": ["node_modules", "dist", "bindings", "e2e-policy-test"],
   "compilerOptions": {
     "target": "ES2022",
     "jsx": "react-jsx",
     "module": "ESNext",
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     },

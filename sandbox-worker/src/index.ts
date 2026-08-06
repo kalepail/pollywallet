@@ -316,7 +316,7 @@ async function handleDeploy(
     if (!installResult.success) {
       // If the deployer is out of funds, try to re-fund and retry once
       if (installOutput.includes("insufficient") || installOutput.includes("NotFound") || installOutput.includes("not found")) {
-        const fundResult = await sandbox.exec(
+        await sandbox.exec(
           `stellar keys fund deployer --network testnet 2>&1`,
           { timeout: 60_000 }
         );

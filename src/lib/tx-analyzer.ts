@@ -65,7 +65,12 @@ export async function analyzeTransaction(hash: string): Promise<TxAnalysis> {
 
 // --- Internal extraction ---
 
-function extractPatterns(envelope: xdr.TransactionEnvelope): TxPattern[] {
+/**
+ * Extract policy-relevant patterns from a transaction envelope.
+ * Exported so it can be tested against locally-built envelopes without
+ * hitting the network (testnet history is pruned, so hash fixtures rot).
+ */
+export function extractPatterns(envelope: xdr.TransactionEnvelope): TxPattern[] {
   const patterns: TxPattern[] = [];
 
   // Handle both regular and fee-bump envelopes

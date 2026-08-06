@@ -10,7 +10,6 @@ import {
   PencilSimple,
 } from "@phosphor-icons/react";
 import { Loader } from "@cloudflare/kumo/components/loader";
-import { Badge } from "@cloudflare/kumo/components/badge";
 import { useState, useCallback } from "react";
 import TxHashInput, { type TxSummary } from "@/components/policy/TxHashInput";
 import PatternSummary from "@/components/policy/PatternSummary";
@@ -29,14 +28,13 @@ import {
   schemaFromPatterns,
   mergeSpecIntoSchema,
   emptySchema,
-  schemaToJSON,
   type PolicySchema,
   type ContractPermission,
   type GlobalRule,
 } from "@/lib/policy-schema";
 import type { TxPattern } from "@/lib/tx-analyzer";
 import { requestContractSpec } from "@/lib/contract-spec";
-import { requestPolicyGeneration, requestStreamingGeneration, requestFixCode, type GenerateChunk } from "@/lib/policy-codegen";
+import { requestStreamingGeneration, requestFixCode } from "@/lib/policy-codegen";
 import type { StreamStats } from "@/components/policy/CodeEditor";
 import { requestTest, requestCompile } from "@/lib/policy-sandbox";
 import { requestDeploy, requestAddContextRule, requestSubmitToRelayer } from "@/lib/policy-deploy";
@@ -161,17 +159,14 @@ function PolicyBuilder() {
   }, []);
 
   const handleRemoveHash = useCallback((hash: string) => {
+    const remaining = txAnalyses.filter((a) => a.hash !== hash);
+    const allPatterns = remaining.flatMap((a) => a.patterns);
+
     setTxSummaries((prev) => prev.filter((s) => s.hash !== hash));
-    setTxAnalyses((prev) => prev.filter((a) => a.hash !== hash));
-    // Recalculate patterns from remaining analyses
-    setTxAnalyses((prev) => {
-      const remaining = prev.filter((a) => a.hash !== hash);
-      const allPatterns = remaining.flatMap((a) => a.patterns);
-      setPatterns(allPatterns);
-      setSelectedPatterns(new Set(allPatterns.map((_, i) => i)));
-      return remaining;
-    });
-  }, []);
+    setTxAnalyses(remaining);
+    setPatterns(allPatterns);
+    setSelectedPatterns(new Set(allPatterns.map((_, i) => i)));
+  }, [txAnalyses]);
 
   const handleTogglePattern = useCallback((index: number) => {
     setSelectedPatterns((prev) => {
@@ -498,9 +493,8 @@ function PolicyBuilder() {
     setInstallStatus("Generating ephemeral signer...");
 
     try {
-      const { Keypair, xdr, Account, TransactionBuilder, Operation, Address, scValToNative } = await import("@stellar/stellar-sdk");
+      const { Keypair, xdr, Account, TransactionBuilder, Operation, scValToNative } = await import("@stellar/stellar-sdk");
       const { rpc } = await import("@stellar/stellar-sdk");
-      const { Buffer } = await import("buffer");
 
       // Generate ephemeral keypair and save secret to localStorage immediately.
       // Must persist before the relayer call — if the install crashes after
@@ -598,7 +592,8 @@ function PolicyBuilder() {
         throw new Error(`Simulation request failed: ${e.message}`);
       }
       if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
-      const simSuccess = simResult as rpc.Api.SimulateTransactionSuccessResponse;
+      const simSuccess =
+        simResult as import("@stellar/stellar-sdk/rpc").Api.SimulateTransactionSuccessResponse;
 
       const authEntries = simSuccess.result?.auth ?? [];
       const expiration = simSuccess.latestLedger + LEDGERS_PER_HOUR;

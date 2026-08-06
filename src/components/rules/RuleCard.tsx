@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { highlightRust } from "@/lib/highlight";
 import {
   Trash,
   PencilSimple,
@@ -56,11 +57,9 @@ function PolicyCodeViewer({ code }: { code: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    import("shiki").then(({ codeToHtml }) =>
-      codeToHtml(code, { lang: "rust", theme: "vesper" })
-    ).then((result) => {
+    highlightRust(code).then((result) => {
       if (!cancelled) setHtml(result);
-    }).catch(() => {});
+    });
     return () => { cancelled = true; };
   }, [code]);
 
