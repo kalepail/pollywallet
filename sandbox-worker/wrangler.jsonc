@@ -7,7 +7,11 @@
 		{
 			"class_name": "Sandbox",
 			"image": "./Dockerfile",
-			"instance_type": "lite",
+			// Rust compilation needs real resources. `lite` is 1/16 vCPU / 256 MiB /
+			// 2 GB disk — the image alone is ~728 MB and rustc cannot build a Soroban
+			// contract in 256 MiB, so policy compilation could never succeed on it.
+			// standard-2 (1 vCPU / 6 GiB / 12 GB) is what AGENTS.md already recommends.
+			"instance_type": "standard-2",
 			"max_instances": 1
 		}
 	],
