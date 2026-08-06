@@ -2,6 +2,8 @@
 
 PollyWallet is a passkey-secured smart wallet demo built on Stellar testnet. It uses WebAuthn passkeys for user authorization, deploys an OpenZeppelin smart account contract per wallet, funds accounts through Friendbot, and submits Soroban transactions through an OpenZeppelin Channels relayer.
 
+Live demo: **https://pollywallet.sdf-ecosystem.workers.dev**
+
 This repository is a testnet-focused application, not a production wallet. Several implementation choices are intentionally convenient for a demo and should be treated as unsafe for mainnet use.
 
 ## What It Does
@@ -156,6 +158,11 @@ The E2E path depends on:
 
 The default test target is `http://localhost:3000`, and the script exercises create, fund, and transfer in one session.
 
+When writing new browser steps, drive controls with `agent-browser ... click <selector>`
+(or a ref from `snapshot -i`). Do **not** use `agent-browser find role button click --name
+"..."` — it reports `✓ Done` without dispatching a real click, so the test silently passes
+over a button that was never pressed.
+
 ## Deployment
 
 Deployments target Cloudflare through Wrangler. There are **two** Workers, and the order
@@ -216,6 +223,22 @@ Check that:
 - the relayer key is valid
 - the relayer base URL points to a compatible environment
 - the testnet RPC endpoint is reachable
+
+### `internal error; reference = ...` from a server function under `pnpm dev`
+
+Local `workerd` cannot reach `soroban-testnet.stellar.org` or `friendbot.stellar.org`;
+both fail this way while unrelated hosts succeed. Deployed Workers are unaffected.
+
+Nothing in the app should call the Stellar RPC from inside a `createServerFn` handler for
+this reason — read-only RPC belongs on the client (see `context-rules.ts` and
+`contract-spec.ts`), and server functions should do only what needs a secret. If you add a
+server-side Stellar call and it fails locally but works in production, this is why.
+
+### `pnpm dev` fails with "Failed to start the remote proxy session"
+
+The Cloudflare Vite plugin needs an account-side edge-preview session for the sandbox
+**container** binding. This is environmental, not a code problem — it reproduces on a clean
+checkout and usually clears on retry.
 
 ### Funding fails
 
