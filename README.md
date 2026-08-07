@@ -67,10 +67,14 @@ git submodule update --init --recursive
 Create a local worker env file for the relayer secret:
 
 ```bash
-cat > .dev.vars <<'EOF'
-CHANNELS_API_KEY=your_openzeppelin_channels_api_key
-EOF
+cp .dev.vars.example .dev.vars   # then fill in the real key
 ```
+
+Keep [.dev.vars.example](./.dev.vars.example) in sync whenever you add a key to `.dev.vars`.
+`wrangler types` folds dev variables into the generated `Env`, and CI copies the example file
+before running `wrangler types --check` — if the two drift apart, CI reports the committed
+`worker-configuration.d.ts` as stale even though it is correct. Only the key names matter;
+the placeholder values are never used.
 
 `CHANNELS_BASE_URL` defaults to the OpenZeppelin testnet endpoint and is already set in [wrangler.jsonc](./wrangler.jsonc). You only need to override it if you are targeting a different relayer base URL.
 
@@ -92,7 +96,30 @@ pnpm test        # run Vitest
 pnpm test:e2e    # run the browser-based WebAuthn E2E flow
 pnpm deploy      # build and deploy with Wrangler
 pnpm cf-typegen  # regenerate Cloudflare environment/runtime types
+pnpm check:model-catalog  # assert the pinned Workers AI model is still live
 ```
+
+## Continuous Integration
+
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) runs typecheck, tests, build, and
+`wrangler types --check` on pull requests and pushes to `main`.
+
+It also verifies that `POLICY_CODEGEN_MODEL` (see [src/lib/constants.ts](./src/lib/constants.ts))
+is still present and not deprecated in the live Workers AI catalog. This exists because
+`@cf/moonshotai/kimi-k2.5` was deprecated and silently aliased to a costlier model, with
+nothing in the repo surfacing it. A weekly scheduled run repeats the check, since deprecation
+is time-based rather than push-based — Cloudflare gives roughly three weeks' notice.
+
+That check requires a **`CLOUDFLARE_API_TOKEN`** repository secret scoped to **Workers AI: Read**:
+
+```bash
+gh secret set CLOUDFLARE_API_TOKEN --repo <owner>/<repo>
+```
+
+Without it, pushes to `main` and scheduled runs fail with `required secret missing:
+CLOUDFLARE_API_TOKEN`. That is deliberate — a check that silently skips is the same silent
+failure it was built to prevent. Pull requests from forks and local runs skip cleanly, since
+forks cannot read secrets.
 
 ## How The Wallet Flow Works
 
