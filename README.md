@@ -92,12 +92,26 @@ The default dev URL is `http://localhost:3000`.
 pnpm dev         # run the local dev server
 pnpm build       # build the bindings package, then the app
 pnpm preview     # build and serve the production bundle locally
-pnpm test        # run Vitest
-pnpm test:e2e    # run the browser-based WebAuthn E2E flow
+pnpm test              # run Vitest
+pnpm test:e2e          # wallet lifecycle: create, fund, transfer (virtual WebAuthn)
+pnpm test:e2e:rules    # context-rules surface (~75 checks)
+pnpm test:e2e:expired  # expired-rule rendering via ledger time passage
+pnpm test:e2e:policy   # policy wizard through deploy + install
+pnpm test:e2e:all      # wallet + rules + expired
 pnpm deploy      # build and deploy with Wrangler
 pnpm cf-typegen  # regenerate Cloudflare environment/runtime types
 pnpm check:model-catalog  # assert the pinned Workers AI model is still live
 ```
+
+The browser suites need a running app and hit Stellar testnet, so they are **not** part of CI —
+run them locally against `pnpm preview` (a production build) rather than `pnpm dev`, whose HMR
+reloads the page and resets React state mid-run. Pass the URL as an argument, e.g.
+`pnpm test:e2e:rules http://localhost:4173`.
+
+`scripts/e2e-fixture.sh` builds the on-chain state the rules suite needs (a wallet with a
+non-default rule carrying an installed policy) and caches its IDs in gitignored
+`scripts/.e2e-fixture.json`, re-validating them on chain and only re-running the paid policy
+wizard when they no longer resolve.
 
 ## Continuous Integration
 
