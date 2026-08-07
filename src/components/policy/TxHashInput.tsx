@@ -2,6 +2,7 @@ import { MagnifyingGlass, Plus, X, FileText } from "@phosphor-icons/react";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { useState } from "react";
+import { EXAMPLE_TXS } from "@/lib/example-txs";
 
 export interface TxSummary {
   hash: string;
@@ -57,6 +58,20 @@ export default function TxHashInput({ txSummaries, onAdd, onRemove, loading }: T
           {loading ? <Loader size={20} /> : <Plus size={20} weight="bold" />}
         </button>
       </div>
+
+      <select
+        value=""
+        disabled={loading}
+        onChange={(e) => e.target.value && onAdd(e.target.value)}
+        className="mt-2 w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-sm text-gray-300 focus:outline-none focus:border-violet-500 transition-colors disabled:opacity-50"
+      >
+        <option value="">Or load an example transaction…</option>
+        {EXAMPLE_TXS.filter((ex) => !txSummaries.some((s) => s.hash === ex.hash)).map((ex) => (
+          <option key={ex.hash} value={ex.hash}>
+            {ex.label} — {ex.detail}
+          </option>
+        ))}
+      </select>
 
       {txSummaries.length > 0 && (
         <div className="mt-4 space-y-2">

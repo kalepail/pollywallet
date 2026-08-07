@@ -1,6 +1,6 @@
 import { xdr, Address, scValToNative } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
-import { TESTNET_RPC_URL } from "./constants";
+import { TESTNET_RPC_URL, TESTNET_HORIZON_URL } from "./constants";
 
 // --- Types ---
 
@@ -44,8 +44,9 @@ const server = new rpc.Server(TESTNET_RPC_URL);
 export async function analyzeTransaction(hash: string): Promise<TxAnalysis> {
   const response = await server.getTransaction(hash);
 
+  // RPC prunes after ~7 days; fall back to Horizon's full history.
   if (response.status === "NOT_FOUND") {
-    throw new Error(`Transaction not found: ${hash}`);
+    return analyzeViaHorizon(hash);
   }
 
   if (response.status === "FAILED") {
@@ -60,6 +61,31 @@ export async function analyzeTransaction(hash: string): Promise<TxAnalysis> {
     ledger: response.ledger,
     timestamp: response.createdAt,
     patterns,
+  };
+}
+
+async function analyzeViaHorizon(hash: string): Promise<TxAnalysis> {
+  const res = await fetch(`${TESTNET_HORIZON_URL}/transactions/${hash}`);
+  if (!res.ok) {
+    throw new Error(`Transaction not found: ${hash}`);
+  }
+
+  const tx = (await res.json()) as {
+    successful: boolean;
+    ledger: number;
+    created_at: string;
+    envelope_xdr: string;
+  };
+
+  if (!tx.successful) {
+    throw new Error(`Transaction failed: ${hash}`);
+  }
+
+  return {
+    hash,
+    ledger: tx.ledger,
+    timestamp: Math.floor(new Date(tx.created_at).getTime() / 1000),
+    patterns: extractPatterns(xdr.TransactionEnvelope.fromXDR(tx.envelope_xdr, "base64")),
   };
 }
 

@@ -7,6 +7,8 @@
 export const POLICY_CODEGEN_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
 export const TESTNET_RPC_URL = "https://soroban-testnet.stellar.org";
+/** RPC only retains ~7 days of transactions; Horizon keeps history back to the last testnet reset. */
+export const TESTNET_HORIZON_URL = "https://horizon-testnet.stellar.org";
 export const TESTNET_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
 
 // --- Smart Account Contract Limits ---
