@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { highlightRust } from "@/lib/highlight";
 import {
   Trash,
@@ -17,7 +17,7 @@ import { Badge } from "@cloudflare/kumo/components/badge";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import type { ContextRuleInfo } from "@/lib/context-rules";
 import type { SavedPolicy } from "@/lib/policy-store";
-import { MAX_CONTEXT_RULE_NAME } from "@/lib/constants";
+import { MAX_CONTEXT_RULE_NAME, MAX_U32, utf8ByteLength } from "@/lib/constants";
 
 interface RuleCardProps {
   rule: ContextRuleInfo;
@@ -106,11 +106,14 @@ export default function RuleCard({
   const [expanded, setExpanded] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [newName, setNewName] = useState(rule.name);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editingExpiration, setEditingExpiration] = useState(false);
   const [expirationInput, setExpirationInput] = useState(
     rule.validUntil?.toString() ?? ""
   );
+  const expirationInputRef = useRef<HTMLInputElement>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [expandedPolicyCode, setExpandedPolicyCode] = useState<string | null>(null);
 
   const isExpired = rule.validUntil != null && rule.validUntil <= latestLedger;
@@ -118,23 +121,41 @@ export default function RuleCard({
   const isProcessing = actionInProgress !== null;
 
   const handleRenameSubmit = () => {
-    const trimmed = newName.trim();
-    if (trimmed && trimmed !== rule.name && trimmed.length <= MAX_CONTEXT_RULE_NAME) {
-      onRename(rule.id, trimmed);
+    const trimmed = nameInputRef.current?.value.trim() ?? newName.trim();
+    if (!trimmed) {
+      setValidationError("Name is required.");
+      return;
     }
+    if (utf8ByteLength(trimmed) > MAX_CONTEXT_RULE_NAME) {
+      setValidationError(`Name must be ${MAX_CONTEXT_RULE_NAME} UTF-8 bytes or fewer.`);
+      return;
+    }
+    if (trimmed !== rule.name) onRename(rule.id, trimmed);
+    setValidationError(null);
     setRenaming(false);
   };
 
   const handleExpirationSubmit = () => {
-    const val = expirationInput.trim();
+    const val = expirationInputRef.current?.value.trim() ?? expirationInput.trim();
     if (val === "") {
       onUpdateExpiration(rule.id, null);
     } else {
-      const ledger = parseInt(val, 10);
-      if (!isNaN(ledger) && ledger > 0) {
-        onUpdateExpiration(rule.id, ledger);
+      if (!/^\d+$/.test(val)) {
+        setValidationError("Expiration must be a whole ledger number.");
+        return;
       }
+      const ledger = Number(val);
+      if (ledger > MAX_U32) {
+        setValidationError(`Expiration cannot exceed ledger ${MAX_U32.toLocaleString()}.`);
+        return;
+      }
+      if (ledger <= latestLedger) {
+        setValidationError(`Expiration must be after current ledger ${latestLedger.toLocaleString()}.`);
+        return;
+      }
+      onUpdateExpiration(rule.id, ledger);
     }
+    setValidationError(null);
     setEditingExpiration(false);
   };
 
@@ -154,20 +175,30 @@ export default function RuleCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             {renaming ? (
-              <input
-                type="text"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleRenameSubmit();
-                  if (e.key === "Escape") setRenaming(false);
-                }}
-                onBlur={handleRenameSubmit}
-                onClick={(e) => e.stopPropagation()}
-                maxLength={MAX_CONTEXT_RULE_NAME}
-                autoFocus
-                className="px-2 py-1 bg-slate-700 border border-cyan-500 rounded text-white text-sm font-semibold focus:outline-none w-40"
-              />
+              <div>
+                <input
+                  ref={nameInputRef}
+                  type="text"
+                  value={newName}
+                  onChange={(e) => {
+                    setNewName(e.target.value);
+                    setValidationError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleRenameSubmit();
+                    if (e.key === "Escape") setRenaming(false);
+                  }}
+                  onBlur={handleRenameSubmit}
+                  onClick={(e) => e.stopPropagation()}
+                  maxLength={MAX_CONTEXT_RULE_NAME}
+                  aria-invalid={validationError != null}
+                  autoFocus
+                  className="px-2 py-1 bg-slate-700 border border-cyan-500 rounded text-white text-sm font-semibold focus:outline-none w-40"
+                />
+                {validationError && (
+                  <p className="text-xs text-red-400 mt-1">{validationError}</p>
+                )}
+              </div>
             ) : (
               <h3 className="text-white font-semibold text-sm truncate">
                 {rule.name}
@@ -310,14 +341,22 @@ export default function RuleCard({
             {editingExpiration ? (
               <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                 <input
+                  ref={expirationInputRef}
                   type="number"
                   value={expirationInput}
-                  onChange={(e) => setExpirationInput(e.target.value)}
+                  onChange={(e) => {
+                    setExpirationInput(e.target.value);
+                    setValidationError(null);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") handleExpirationSubmit();
                     if (e.key === "Escape") setEditingExpiration(false);
                   }}
                   placeholder="Ledger # (blank = none)"
+                  min={latestLedger + 1}
+                  max={MAX_U32}
+                  step={1}
+                  aria-invalid={validationError != null}
                   className="px-2 py-1 bg-slate-700 border border-cyan-500 rounded text-white text-xs font-mono focus:outline-none w-40"
                   autoFocus
                 />
@@ -328,6 +367,9 @@ export default function RuleCard({
                 >
                   Save
                 </button>
+                {validationError && (
+                  <p className="text-xs text-red-400">{validationError}</p>
+                )}
                 <button
                   onClick={() => setEditingExpiration(false)}
                   className="px-2 py-1 text-gray-400 hover:text-white text-xs transition-colors"
@@ -360,6 +402,7 @@ export default function RuleCard({
                 e.stopPropagation();
                 setRenaming(true);
                 setNewName(rule.name);
+                setValidationError(null);
               }}
               disabled={isProcessing}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 hover:text-cyan-400 hover:bg-slate-700/50 rounded-lg transition-colors disabled:opacity-50"
@@ -377,6 +420,7 @@ export default function RuleCard({
                 e.stopPropagation();
                 setEditingExpiration(true);
                 setExpirationInput(rule.validUntil?.toString() ?? "");
+                setValidationError(null);
               }}
               disabled={isProcessing}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 hover:text-cyan-400 hover:bg-slate-700/50 rounded-lg transition-colors disabled:opacity-50"

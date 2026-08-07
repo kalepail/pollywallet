@@ -18,6 +18,7 @@ import {
   requestRemoveContextRule,
   requestRenameContextRule,
   requestUpdateExpiration,
+  assertTransactionSuccess,
 } from "@/lib/rule-management";
 import { requestSubmitToRelayer } from "@/lib/policy-deploy";
 import { loadPolicy, type SavedPolicy } from "@/lib/policy-store";
@@ -25,7 +26,7 @@ import RuleCard from "@/components/rules/RuleCard";
 
 export const Route = createFileRoute("/rules")({ component: RulesManager });
 
-function RulesManager() {
+export function RulesManager() {
   // Wallet — loaded from localStorage, same pattern as policies.tsx
   const [wallet] = useState<StoredWallet | null>(() => {
     try {
@@ -171,7 +172,10 @@ function RulesManager() {
 
       if (relayerResult.hash) {
         setStatus("Confirming...");
-        await server.pollTransaction(relayerResult.hash, { attempts: 15 });
+        const confirmation = await server.pollTransaction(relayerResult.hash, { attempts: 15 });
+        assertTransactionSuccess(confirmation.status);
+      } else {
+        throw new Error("Relayer did not return a transaction hash; no changes were saved.");
       }
 
       setStatus("");
@@ -308,7 +312,7 @@ function RulesManager() {
         )}
 
         {/* Empty state */}
-        {!rulesLoading && rules.length === 0 && (
+        {!rulesLoading && !error && rules.length === 0 && (
           <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-8 text-center">
             <p className="text-gray-400">
               No context rules found on this wallet.

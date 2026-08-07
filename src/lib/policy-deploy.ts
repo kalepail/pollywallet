@@ -28,6 +28,15 @@ function validateDeployInput(data: unknown): DeployInput {
   if (wasmBase64.length > 2_000_000) {
     throw new Error("WASM exceeds maximum size (2MB base64)");
   }
+  let wasm: string;
+  try {
+    wasm = atob(wasmBase64);
+  } catch {
+    throw new Error("wasmBase64 must be valid base64");
+  }
+  if (!wasm.startsWith("\0asm\x01\0\0\0")) {
+    throw new Error("wasmBase64 must encode a WebAssembly module");
+  }
   return { wasmBase64 };
 }
 

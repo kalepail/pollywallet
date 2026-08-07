@@ -14,3 +14,10 @@ export const TESTNET_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
 
 /** Max bytes for a context rule name. */
 export const MAX_CONTEXT_RULE_NAME = 20;
+
+/** Largest value accepted by Soroban's u32 type. */
+export const MAX_U32 = 0xffff_ffff;
+
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}

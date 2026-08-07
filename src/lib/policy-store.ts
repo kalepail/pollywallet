@@ -1,7 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
+import { StrKey } from "@stellar/stellar-sdk";
 import type { PolicySchema } from "./policy-schema";
-import { schemaToJSON, schemaFromJSON } from "./policy-schema";
+import { schemaToJSON, schemaFromJSON, validateSchema } from "./policy-schema";
 
 // --- Types ---
 
@@ -37,10 +38,16 @@ interface SavedPolicyJSON {
 function validateSaveInput(data: unknown): SavedPolicyJSON {
   if (typeof data !== "object" || data === null) throw new Error("Invalid payload");
   const d = data as Record<string, unknown>;
-  if (typeof d.contractAddress !== "string" || !d.contractAddress.startsWith("C"))
+  if (typeof d.contractAddress !== "string" || !StrKey.isValidContract(d.contractAddress))
     throw new Error("contractAddress must be a Stellar contract address (C...)");
   if (typeof d.wasmHash !== "string") throw new Error("wasmHash required");
   if (typeof d.schemaJson !== "string") throw new Error("schemaJson required");
+  try {
+    const validation = validateSchema(schemaFromJSON(d.schemaJson));
+    if (!validation.valid) throw new Error(validation.errors.join("; "));
+  } catch (error) {
+    throw new Error(`schemaJson must contain a valid policy schema: ${error instanceof Error ? error.message : "invalid schema"}`);
+  }
   if (typeof d.rustCode !== "string") throw new Error("rustCode required");
   if (d.network !== "testnet" && d.network !== "mainnet") throw new Error("network must be testnet or mainnet");
   return d as unknown as SavedPolicyJSON;

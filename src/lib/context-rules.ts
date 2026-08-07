@@ -1,4 +1,4 @@
-import { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
+import { MAX_U32, TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
 
 // --- Types ---
 
@@ -54,18 +54,44 @@ export async function requestContextRules(walletContractId: string): Promise<{
     }
 
     const count = await simulateCall("get_context_rules_count");
-    const ruleCount = typeof count === "number" ? count : Number(count ?? 0);
+    const ruleCount = Number(count);
+
+    if (
+      (typeof count !== "number" && typeof count !== "bigint") ||
+      !Number.isSafeInteger(ruleCount) ||
+      ruleCount < 0 ||
+      ruleCount > MAX_U32
+    ) {
+      throw new Error("Contract returned an invalid context rule count");
+    }
 
     if (ruleCount === 0) {
       return { success: true, error: null, rules: [] };
     }
 
+    const nextIdEntry = (await server.getContractInstance(walletContractId))
+      .storage()
+      ?.find((entry) => {
+        const key = scValToNative(entry.key());
+        return Array.isArray(key) && key.length === 1 && key[0] === "NextId";
+      });
+    const nextIdValue = nextIdEntry && scValToNative(nextIdEntry.val());
+    const nextId = Number(nextIdValue);
+
+    if (
+      (typeof nextIdValue !== "number" && typeof nextIdValue !== "bigint") ||
+      !Number.isSafeInteger(nextId) ||
+      nextId < ruleCount ||
+      nextId > MAX_U32
+    ) {
+      throw new Error("Contract returned an invalid next context rule ID");
+    }
+
     const rules: ContextRuleInfo[] = [];
 
     // Rule IDs are monotonically incrementing and never reused after deletion,
-    // so there can be gaps. Scan until we've found all `ruleCount` active rules.
-    const maxScan = ruleCount * 5; // generous upper bound to handle sparse IDs
-    for (let id = 0; rules.length < ruleCount && id < maxScan; id++) {
+    // so scan the contract's actual NextId range rather than guessing from count.
+    for (let id = 0; rules.length < ruleCount && id < nextId; id++) {
       try {
         const rule = await simulateCall("get_context_rule", [nativeToScVal(id, { type: "u32" })]);
         if (!rule) continue;
@@ -119,6 +145,10 @@ export async function requestContextRules(walletContractId: string): Promise<{
       } catch {
         // Skip rules that fail to fetch (may have been removed)
       }
+    }
+
+    if (rules.length !== ruleCount) {
+      throw new Error(`Expected ${ruleCount} context rules but found ${rules.length}`);
     }
 
     return { success: true, error: null, rules };

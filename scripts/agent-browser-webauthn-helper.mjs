@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile, spawn } from "node:child_process";
+import { appendFileSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +34,11 @@ Options:
   --user-verification <bool> true | false
   --verified <bool>          true | false
   --presence <bool>          true | false
+  --require-credential <bool> Fail when no virtual credential is observed
+
+Environment:
+  WEBAUTHN_EVENTS_FILE       Optional JSONL diagnostics file
+  WEBAUTHN_CONTROL_FILE      Optional file accepting uv:false and uv:true
 
 Examples:
   agent-browser --session demo open http://127.0.0.1:5173
@@ -102,6 +108,27 @@ function parseBoolean(value, fallback) {
   throw new Error(`Expected a boolean value, received "${value}"`);
 }
 
+function logDiagnostic(record) {
+  const line = JSON.stringify({ at: new Date().toISOString(), ...record });
+  const file = process.env.WEBAUTHN_EVENTS_FILE;
+  if (file) {
+    try {
+      appendFileSync(file, `${line}\n`);
+      return;
+    } catch { /* fall through to stderr */ }
+  }
+  console.error(line);
+}
+
+function redactCredential(credential) {
+  return {
+    credentialIdPrefix: String(credential.credentialId ?? "").slice(0, 16),
+    rpId: credential.rpId,
+    signCount: credential.signCount,
+    isResidentCredential: credential.isResidentCredential,
+  };
+}
+
 async function runAgentBrowser(args) {
   const { stdout } = await execFileAsync("agent-browser", args, {
     encoding: "utf8",
@@ -149,13 +176,17 @@ async function resolveCurrentUrl(args) {
   return getLastNonEmptyLine(output) ?? null;
 }
 
-function createCDPConnection(browserWsUrl) {
+function createCDPConnection(browserWsUrl, onEvent) {
   const socket = new WebSocket(browserWsUrl);
   let nextId = 0;
   const pending = new Map();
 
   socket.onmessage = (event) => {
     const message = JSON.parse(event.data);
+    if (message.method && !message.id) {
+      onEvent?.(message);
+      return;
+    }
     if (message.id && pending.has(message.id)) {
       const { resolve, reject } = pending.get(message.id);
       pending.delete(message.id);
@@ -243,10 +274,21 @@ async function commandRun(args, childCommand) {
 
   const cdpUrl = await resolveCDPUrl(args);
   const preferredUrl = await resolveCurrentUrl(args);
-  const connection = createCDPConnection(cdpUrl);
+  const requireCredential = parseBoolean(args["require-credential"], false);
+  let credentialAddedCount = 0;
+  let credentialAssertedCount = 0;
+  const connection = createCDPConnection(cdpUrl, (message) => {
+    if (message.method !== "WebAuthn.credentialAdded" &&
+        message.method !== "WebAuthn.credentialAsserted") return;
+    if (message.method === "WebAuthn.credentialAdded") credentialAddedCount += 1;
+    else credentialAssertedCount += 1;
+    const params = { ...message.params };
+    if (params.credential) params.credential = redactCredential(params.credential);
+    logDiagnostic({ event: message.method, params });
+  });
   await connection.ready;
 
-  const { sessionId, pageUrl } = await attachToPage(connection.send, preferredUrl);
+  const { sessionId, pageUrl, targetId } = await attachToPage(connection.send, preferredUrl);
   const authenticatorOptions = {
     protocol: args.protocol || DEFAULT_AUTHENTICATOR_OPTIONS.protocol,
     transport: args.transport || DEFAULT_AUTHENTICATOR_OPTIONS.transport,
@@ -268,31 +310,67 @@ async function commandRun(args, childCommand) {
     ),
   };
 
-  await connection.send("WebAuthn.enable", {}, sessionId);
+  await connection.send("WebAuthn.enable", { enableUI: false }, sessionId);
   const { authenticatorId } = await connection.send(
     "WebAuthn.addVirtualAuthenticator",
     { options: authenticatorOptions },
     sessionId
   );
 
-  console.error(
-    JSON.stringify(
-      {
-        session: typeof args.session === "string" ? args.session : null,
-        cdpUrl,
-        pageUrl,
-        authenticatorId,
-        options: authenticatorOptions,
-      },
-      null,
-      2
-    )
-  );
+  logDiagnostic({
+    setup: {
+      session: typeof args.session === "string" ? args.session : null,
+      pageUrl,
+      targetId,
+      authenticatorId,
+      options: authenticatorOptions,
+      enableUI: false,
+    },
+  });
 
   let exitCode = 0;
+  let controlTimer;
+  let credentialFailure = false;
   try {
+    const controlFile = process.env.WEBAUTHN_CONTROL_FILE;
+    if (controlFile) {
+      let lastDirective = "";
+      controlTimer = setInterval(() => {
+        let directive;
+        try {
+          directive = readFileSync(controlFile, "utf8").trim().split("\n").at(-1);
+        } catch { return; }
+        if (!directive || directive === lastDirective) return;
+        lastDirective = directive;
+        if (directive !== "uv:false" && directive !== "uv:true") return;
+        connection.send(
+          "WebAuthn.setUserVerified",
+          { authenticatorId, isUserVerified: directive === "uv:true" },
+          sessionId
+        ).then(() => logDiagnostic({ controlApplied: directive }))
+          .catch((error) => logDiagnostic({ controlError: String(error) }));
+      }, 500);
+    }
     exitCode = await runChildCommand(childCommand[0], childCommand.slice(1));
   } finally {
+    if (controlTimer) clearInterval(controlTimer);
+    try {
+      const { credentials } = await connection.send(
+        "WebAuthn.getCredentials", { authenticatorId }, sessionId
+      );
+      logDiagnostic({
+        finalCredentials: credentials.map(redactCredential),
+        credentialAddedCount,
+        credentialAssertedCount,
+      });
+      if (credentials.length === 0) {
+        console.error("Failure: No virtual credential observed");
+        credentialFailure = requireCredential;
+      }
+    } catch (error) {
+      logDiagnostic({ getCredentialsError: String(error) });
+      credentialFailure = requireCredential;
+    }
     try {
       await connection.send(
         "WebAuthn.removeVirtualAuthenticator",
@@ -312,6 +390,7 @@ async function commandRun(args, childCommand) {
     connection.close();
   }
 
+  if (exitCode === 0 && credentialFailure) exitCode = 1;
   process.exitCode = exitCode;
 }
 

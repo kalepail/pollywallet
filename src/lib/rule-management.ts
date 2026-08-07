@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { MAX_CONTEXT_RULE_NAME } from "./constants";
+import { MAX_CONTEXT_RULE_NAME, MAX_U32, utf8ByteLength } from "./constants";
 
 // --- Types ---
 
@@ -48,8 +48,8 @@ function validateRenameInput(data: unknown): RenameRuleInput {
     throw new Error("contextRuleId must be a non-negative number");
   if (typeof d.name !== "string" || !d.name)
     throw new Error("name required");
-  if (d.name.length > MAX_CONTEXT_RULE_NAME)
-    throw new Error(`name must be ${MAX_CONTEXT_RULE_NAME} characters or fewer`);
+  if (utf8ByteLength(d.name) > MAX_CONTEXT_RULE_NAME)
+    throw new Error(`name must be ${MAX_CONTEXT_RULE_NAME} UTF-8 bytes or fewer`);
   return {
     walletContractId: d.walletContractId,
     contextRuleId: d.contextRuleId,
@@ -64,8 +64,14 @@ function validateExpirationInput(data: unknown): UpdateExpirationInput {
     throw new Error("walletContractId required");
   if (typeof d.contextRuleId !== "number" || d.contextRuleId < 0)
     throw new Error("contextRuleId must be a non-negative number");
-  if (d.validUntil !== null && (typeof d.validUntil !== "number" || d.validUntil < 0))
-    throw new Error("validUntil must be a non-negative number or null");
+  if (
+    d.validUntil !== null &&
+    (typeof d.validUntil !== "number" ||
+      !Number.isInteger(d.validUntil) ||
+      d.validUntil < 0 ||
+      d.validUntil > MAX_U32)
+  )
+    throw new Error(`validUntil must be a whole number from 0 to ${MAX_U32}, or null`);
   return {
     walletContractId: d.walletContractId,
     contextRuleId: d.contextRuleId,
@@ -180,4 +186,14 @@ export async function requestUpdateExpiration(params: {
   validUntil: number | null;
 }): Promise<BuildTxResult> {
   return buildUpdateExpirationTx({ data: params });
+}
+
+export function assertTransactionSuccess(status: string): void {
+  if (status !== "SUCCESS") {
+    throw new Error(
+      status === "FAILED"
+        ? "Transaction failed on-chain; no changes were saved."
+        : "Transaction was not confirmed; no changes are shown as saved."
+    );
+  }
 }
