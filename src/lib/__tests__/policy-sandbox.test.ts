@@ -6,7 +6,7 @@ vi.mock("@tanstack/react-start", () => ({
   }),
 }));
 
-import { generateTestCases } from "../policy-sandbox";
+import { generateTestCases, parseSseFrames } from "../policy-sandbox";
 import type { PolicySchema } from "../policy-schema";
 import { SCHEMA_VERSION } from "../policy-schema";
 
@@ -125,5 +125,38 @@ describe("generateTestCases", () => {
     expect(output).toContain("// user");
     expect(output).toContain("// amount");
     expect(output).toContain("// auto_stake");
+  });
+});
+
+describe("parseSseFrames", () => {
+  const frame = (chunk: unknown) => `data: ${JSON.stringify(chunk)}\n\n`;
+
+  it("yields complete frames and holds the partial tail", () => {
+    const wire = frame({ type: "log", text: "Compiling soroban-sdk v27.0.5" }) + 'data: {"type":"log","te';
+
+    const { chunks, rest } = parseSseFrames(wire);
+
+    expect(chunks).toEqual([{ type: "log", text: "Compiling soroban-sdk v27.0.5" }]);
+    expect(rest).toBe('data: {"type":"log","te');
+  });
+
+  it("recovers a frame split across two reads", () => {
+    const wire = frame({ type: "log", text: "test test_install_succeeds ... ok" });
+    const split = Math.floor(wire.length / 2);
+
+    const first = parseSseFrames(wire.slice(0, split));
+    expect(first.chunks).toEqual([]);
+
+    const second = parseSseFrames(first.rest + wire.slice(split));
+    expect(second.chunks).toEqual([{ type: "log", text: "test test_install_succeeds ... ok" }]);
+  });
+
+  it("skips a malformed frame instead of throwing", () => {
+    const wire = "data: {not json\n\n" + frame({ type: "result", result: { success: true, compiled: true, testCases: [], compileOutput: "" } });
+
+    const { chunks } = parseSseFrames(wire);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].type).toBe("result");
   });
 });

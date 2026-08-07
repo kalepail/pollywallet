@@ -1,7 +1,7 @@
 import { Flask, CheckCircle, XCircle, CaretDown, Warning, Wrench } from "@phosphor-icons/react";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { Badge } from "@cloudflare/kumo/components/badge";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export interface TestResult {
   name: string;
@@ -20,9 +20,11 @@ interface TestResultsProps {
   results: TestResult[];
   loading?: boolean;
   buildTimeline?: BuildAttempt[];
+  /** Live cargo output while a build is running. */
+  log?: string[];
 }
 
-export default function TestResults({ results, loading, buildTimeline }: TestResultsProps) {
+export default function TestResults({ results, loading, buildTimeline, log }: TestResultsProps) {
   const passed = results.filter((r) => r.passed).length;
   const failed = results.length - passed;
 
@@ -39,9 +41,15 @@ export default function TestResults({ results, loading, buildTimeline }: TestRes
       )}
 
       {loading ? (
-        <div className="bg-slate-900/70 border border-slate-700 rounded-xl p-8 flex flex-col items-center justify-center gap-3">
-          <Loader size={32} />
-          <p className="text-sm text-gray-400">Running sandbox tests...</p>
+        <div className="bg-slate-900/70 border border-slate-700 rounded-xl p-4 space-y-3">
+          <div className="flex items-center gap-3">
+            <Loader size={20} />
+            <p className="text-sm text-gray-400">
+              Running sandbox tests
+              {log && log.length > 0 && <span className="text-gray-500"> — {log.length} lines</span>}
+            </p>
+          </div>
+          <BuildLog log={log} />
         </div>
       ) : results.length === 0 ? (
         <p className="text-sm text-gray-500">No test results yet.</p>
@@ -61,6 +69,29 @@ export default function TestResults({ results, loading, buildTimeline }: TestRes
         </>
       )}
     </div>
+  );
+}
+
+function BuildLog({ log }: { log?: string[] }) {
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [log?.length]);
+
+  if (!log || log.length === 0) {
+    return (
+      <p className="text-xs text-gray-500 font-mono">
+        Starting container — a cold run downloads and compiles ~180 crates, which takes a few minutes.
+      </p>
+    );
+  }
+
+  return (
+    <pre className="bg-slate-950/60 rounded-lg p-3 text-xs text-gray-400 font-mono overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">
+      {log.join("\n")}
+      <div ref={endRef} />
+    </pre>
   );
 }
 

@@ -595,33 +595,102 @@ export const compilePolicyCode = createServerFn({ method: "POST" })
     }
   });
 
-export const testPolicyCode = createServerFn({ method: "POST" })
+/** A line of cargo output, or the final parsed result once the run finishes. */
+export interface TestStreamChunk {
+  type: "log" | "result";
+  text?: string;
+  result?: TestResult;
+}
+
+/**
+ * Split a buffer of SSE text into complete chunks, returning any partial
+ * trailing frame to be prepended to the next read. A network read can land
+ * mid-frame, so the tail must survive rather than be parsed or dropped.
+ */
+export function parseSseFrames(buffer: string): { chunks: TestStreamChunk[]; rest: string } {
+  const frames = buffer.split("\n\n");
+  const rest = frames.pop() ?? "";
+  const chunks: TestStreamChunk[] = [];
+
+  for (const frame of frames) {
+    const line = frame.trim();
+    if (!line.startsWith("data: ")) continue;
+    try {
+      chunks.push(JSON.parse(line.slice(6)) as TestStreamChunk);
+    } catch {
+      // A malformed frame shouldn't kill an in-progress build — skip it.
+    }
+  }
+
+  return { chunks, rest };
+}
+
+function errorChunk(message: string): TestStreamChunk {
+  return {
+    type: "result",
+    result: { success: false, compiled: false, testCases: [], compileOutput: message },
+  };
+}
+
+/**
+ * Streaming server function. Yields each line the sandbox prints while the
+ * build runs, then one final "result" chunk. A cold run spends minutes
+ * downloading and compiling crates, so the log is the only progress signal
+ * there is.
+ */
+export const streamPolicyTest = createServerFn({ method: "POST" })
   .inputValidator(validateSandboxInput)
-  .handler(async ({ data }): Promise<TestResult> => {
+  .handler(async function* ({ data }): AsyncGenerator<TestStreamChunk> {
     const { rustCode, testCode } = data;
     const sandbox = env.SANDBOX;
     if (!sandbox) {
-      return { success: false, compiled: false, testCases: [], compileOutput: "Sandbox service not configured." };
+      yield errorChunk("Sandbox service not configured.");
+      return;
     }
+
+    let response: Response;
     try {
-      const response = await sandbox.fetch("https://sandbox/test", {
+      response = await sandbox.fetch("https://sandbox/test/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cargoToml: CARGO_TOML_TEMPLATE, libRs: rustCode, testCode: testCode ?? "" }),
       });
-      if (!response.ok) {
-        const errorText = await response.text();
-        return { success: false, compiled: false, testCases: [], compileOutput: `Sandbox test failed (${response.status}): ${errorText}` };
-      }
-      const result = await response.json() as any;
-      return {
-        success: result.success ?? false,
-        compiled: result.compiled ?? false,
-        testCases: (result.testCases ?? []).map((tc: any) => ({ name: tc.name ?? "unknown", passed: tc.passed ?? false, output: tc.output ?? "" })),
-        compileOutput: result.compileOutput ?? "",
-      };
     } catch (err: any) {
-      return { success: false, compiled: false, testCases: [], compileOutput: err.message || "Failed to reach sandbox service" };
+      yield errorChunk(err.message || "Failed to reach sandbox service");
+      return;
+    }
+
+    if (!response.ok || !response.body) {
+      const errorText = response.body ? await response.text() : "(no response body)";
+      yield errorChunk(`Sandbox test failed (${response.status}): ${errorText}`);
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let sawResult = false;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const { chunks, rest } = parseSseFrames(buffer);
+        buffer = rest;
+        for (const chunk of chunks) {
+          if (chunk.type === "result") sawResult = true;
+          yield chunk;
+        }
+      }
+    } catch (err: any) {
+      yield errorChunk(err.message || "Sandbox stream failed");
+      return;
+    }
+
+    if (!sawResult) {
+      yield errorChunk("Sandbox stream ended without a result.");
     }
   });
 
@@ -631,7 +700,29 @@ export async function requestCompile(rustCode: string): Promise<CompileResult> {
   return compilePolicyCode({ data: { rustCode } });
 }
 
-export async function requestTest(rustCode: string, schema: PolicySchema): Promise<TestResult> {
+/** Runs the sandbox tests, calling `onLog` for each line of cargo output as it arrives. */
+export async function requestTest(
+  rustCode: string,
+  schema: PolicySchema,
+  onLog?: (line: string) => void,
+): Promise<TestResult> {
   const testCode = generateTestCases(schema);
-  return testPolicyCode({ data: { rustCode, testCode } });
+  const generator = await streamPolicyTest({ data: { rustCode, testCode } });
+
+  let result: TestResult = {
+    success: false,
+    compiled: false,
+    testCases: [],
+    compileOutput: "Sandbox stream ended without a result.",
+  };
+
+  for await (const chunk of generator) {
+    if (chunk.type === "log" && chunk.text) {
+      onLog?.(chunk.text);
+    } else if (chunk.type === "result" && chunk.result) {
+      result = chunk.result;
+    }
+  }
+
+  return result;
 }

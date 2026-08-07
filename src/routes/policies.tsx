@@ -92,6 +92,7 @@ function PolicyBuilder() {
   // Step 4: Test Results
   const [testResults, setTestResults] = useState<TestResult[]>([]);
   const [buildTimeline, setBuildTimeline] = useState<BuildAttempt[]>([]);
+  const [testLog, setTestLog] = useState<string[]>([]);
 
   // Step 5: Deploy
   const [wasmBase64, setWasmBase64] = useState<string | null>(null);
@@ -377,6 +378,7 @@ function PolicyBuilder() {
     setError(null);
     setTestResults([]);
     setBuildTimeline([]);
+    setTestLog([]);
 
     let codeToTest = generatedCode;
     const timeline: BuildAttempt[] = [];
@@ -385,7 +387,11 @@ function PolicyBuilder() {
       for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
         // Run test first (includes compilation), then compile for WASM separately.
         // These MUST be sequential — both use the same sandbox project directory.
-        const testResult = await requestTest(codeToTest, schema);
+        // ponytail: keep the last 300 lines — a cold cargo run prints thousands,
+        // and only the tail is useful. Raise it if a failure scrolls off.
+        const testResult = await requestTest(codeToTest, schema, (line) =>
+          setTestLog((prev) => [...prev, line].slice(-300)),
+        );
 
         // Compilation succeeded — show results
         if (testResult.compiled) {
@@ -906,7 +912,7 @@ function PolicyBuilder() {
 
         {step === 3 && (
           <>
-            <TestResults results={testResults} loading={loading} buildTimeline={buildTimeline} />
+            <TestResults results={testResults} loading={loading} buildTimeline={buildTimeline} log={testLog} />
             <div className="flex gap-3">
               <button
                 onClick={handleBack}

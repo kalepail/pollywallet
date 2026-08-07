@@ -1,4 +1,4 @@
-import { getSandbox, type Sandbox as SandboxType } from "@cloudflare/sandbox";
+import { getSandbox, parseSSEStream, type ExecEvent, type Sandbox as SandboxType } from "@cloudflare/sandbox";
 
 export { Sandbox } from "@cloudflare/sandbox";
 
@@ -145,7 +145,67 @@ async function handleCompile(
   }
 }
 
-async function handleTest(
+/** Parse `cargo test` output into per-test results. */
+function parseTestOutput(output: string, execSucceeded: boolean) {
+  const testCases: Array<{ name: string; passed: boolean; output: string }> = [];
+  const testLineRegex = /test (\S+) \.\.\. (ok|FAILED)/g;
+  let match;
+
+  while ((match = testLineRegex.exec(output)) !== null) {
+    testCases.push({
+      name: match[1],
+      passed: match[2] === "ok",
+      output: "",
+    });
+  }
+
+  // Extract per-test failure output from cargo test's stdout sections
+  // Format: "---- tests::test_name stdout ----\n...output...\n\n"
+  for (const tc of testCases) {
+    if (tc.passed) {
+      tc.output = "ok";
+      continue;
+    }
+    const sectionRegex = new RegExp(
+      `---- ${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} stdout ----\\n([\\s\\S]*?)(?=\\n\\n|$)`
+    );
+    const sectionMatch = output.match(sectionRegex);
+    if (sectionMatch) {
+      tc.output = sectionMatch[1].trim().slice(0, 2000);
+    } else {
+      // Try to find the panic message directly
+      const panicRegex = new RegExp(
+        `thread '${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' panicked at ([^\\n]+)`
+      );
+      const panicMatch = output.match(panicRegex);
+      tc.output = panicMatch ? panicMatch[0].slice(0, 2000) : "(test failed — no captured output)";
+    }
+  }
+
+  // Check if compilation succeeded (tests ran at all)
+  const compiled = output.includes("running") || output.includes("test result");
+  const hasRealError = output.includes("error[E") || output.includes("error: could not compile");
+  const success = execSucceeded && testCases.every((tc) => tc.passed);
+
+  // If not compiled and no real error, this was likely a timeout during
+  // dependency download / initial compilation. Report it clearly.
+  let compileOutput = output.slice(0, 5000);
+  if (!compiled && !hasRealError && !execSucceeded) {
+    compileOutput = "Build timed out (likely downloading dependencies on first run). Retrying should be faster.\n\n" + compileOutput;
+  }
+
+  return { success, compiled, testCases, compileOutput };
+}
+
+/**
+ * Run the tests and stream every line cargo prints back to the caller as SSE.
+ *
+ * A cold run downloads ~180 crates and compiles them, which takes minutes —
+ * a single blocking response left the UI with nothing to show for it. Here
+ * `cargo test` does the fetch itself (same on-disk cache the separate
+ * `cargo fetch` warmed) so the download is part of the streamed output.
+ */
+async function handleTestStream(
   request: Request,
   env: Env
 ): Promise<Response> {
@@ -166,87 +226,63 @@ async function handleTest(
 
   const sandbox = getSandbox(env.Sandbox, SANDBOX_ID);
   const projectDir = newProjectDir();
+  const fullLibRs = testCode
+    ? `${libRs}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use soroban_sdk::{Env, Address};\n\n${testCode}\n}`
+    : libRs;
 
-  try {
-    // If testCode is provided, append it to the lib.rs
-    const fullLibRs = testCode ? `${libRs}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use soroban_sdk::{Env, Address};\n\n${testCode}\n}` : libRs;
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (chunk: unknown) =>
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
 
-    await setupProject(sandbox, projectDir, cargoToml, fullLibRs);
+      let output = "";
+      try {
+        send({ type: "log", text: `Writing project to ${projectDir}` });
+        await sandbox.exec(`mkdir -p ${projectDir}/src`);
+        await sandbox.writeFile(`${projectDir}/Cargo.toml`, cargoToml);
+        await sandbox.writeFile(`${projectDir}/src/lib.rs`, fullLibRs);
+        send({ type: "log", text: "$ cargo test" });
 
-    // Run cargo test (deps already fetched in setupProject)
-    const testResult = await sandbox.exec(`${CARGO_ENV} cargo test 2>&1`, {
-      cwd: projectDir,
-      timeout: 240_000,
-    });
+        const events = await sandbox.execStream(`${CARGO_ENV} cargo test 2>&1`, {
+          cwd: projectDir,
+          timeout: 300_000,
+        });
 
-    const output = testResult.stdout + testResult.stderr;
+        let exitCode: number | null = null;
+        for await (const event of parseSSEStream<ExecEvent>(events)) {
+          if ((event.type === "stdout" || event.type === "stderr") && event.data) {
+            output += event.data;
+            for (const line of event.data.split("\n")) {
+              if (line.trim()) send({ type: "log", text: line });
+            }
+          } else if (event.type === "complete") {
+            exitCode = event.exitCode ?? null;
+          } else if (event.type === "error" && event.error) {
+            send({ type: "log", text: event.error });
+          }
+        }
 
-    // Parse test results from cargo test output
-    const testCases: Array<{ name: string; passed: boolean; output: string }> = [];
-    const testLineRegex = /test (\S+) \.\.\. (ok|FAILED)/g;
-    let match;
-
-    while ((match = testLineRegex.exec(output)) !== null) {
-      testCases.push({
-        name: match[1],
-        passed: match[2] === "ok",
-        output: "",
-      });
-    }
-
-    // Extract per-test failure output from cargo test's stdout sections
-    // Format: "---- tests::test_name stdout ----\n...output...\n\n"
-    for (const tc of testCases) {
-      if (tc.passed) {
-        tc.output = "ok";
-        continue;
+        send({ type: "result", result: parseTestOutput(output, exitCode === 0) });
+      } catch (err: unknown) {
+        send({
+          type: "result",
+          result: {
+            success: false,
+            compiled: false,
+            testCases: [],
+            compileOutput: err instanceof Error ? err.message : "Sandbox test failed",
+          },
+        });
+      } finally {
+        controller.close();
       }
-      const sectionRegex = new RegExp(
-        `---- ${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} stdout ----\\n([\\s\\S]*?)(?=\\n\\n|$)`
-      );
-      const sectionMatch = output.match(sectionRegex);
-      if (sectionMatch) {
-        tc.output = sectionMatch[1].trim().slice(0, 2000);
-      } else {
-        // Try to find the panic message directly
-        const panicRegex = new RegExp(
-          `thread '${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' panicked at ([^\\n]+)`
-        );
-        const panicMatch = output.match(panicRegex);
-        tc.output = panicMatch ? panicMatch[0].slice(0, 2000) : "(test failed — no captured output)";
-      }
-    }
+    },
+  });
 
-    // Check if compilation succeeded (tests ran at all)
-    const compiled = output.includes("running") || output.includes("test result");
-    const hasRealError = output.includes("error[E") || output.includes("error: could not compile");
-    const success = testResult.success && testCases.every((tc) => tc.passed);
-
-    // If not compiled and no real error, this was likely a timeout during
-    // dependency download / initial compilation. Report it clearly.
-    let compileOutput = output.slice(0, 5000);
-    if (!compiled && !hasRealError && !testResult.success) {
-      compileOutput = "Build timed out (likely downloading dependencies on first run). Retrying should be faster.\n\n" + compileOutput;
-    }
-
-    return Response.json({
-      success,
-      compiled,
-      testCases,
-      compileOutput,
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Sandbox test failed";
-    return Response.json(
-      {
-        success: false,
-        compiled: false,
-        testCases: [],
-        compileOutput: message,
-      },
-      { status: 500 }
-    );
-  }
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+  });
 }
 
 interface DeployRequest {
@@ -449,8 +485,8 @@ export default {
     switch (url.pathname) {
       case "/compile":
         return handleCompile(request, env);
-      case "/test":
-        return handleTest(request, env);
+      case "/test/stream":
+        return handleTestStream(request, env);
       case "/deploy":
         return handleDeploy(request, env);
       default:
