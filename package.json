@@ -15,6 +15,7 @@
     "test:e2e:expired": "bash scripts/e2e-expired.sh",
     "test:e2e:policy": "bash scripts/e2e-policy.sh",
     "check:examples": "tsx scripts/check-example-txs.mts",
+    "fund:usdc": "tsx scripts/fund-usdc.mts",
     "test:e2e:all": "bash scripts/e2e-test.sh && bash scripts/e2e-rules.sh && bash scripts/e2e-expired.sh",
     "deploy": "pnpm run build && wrangler deploy",
     "cf-typegen": "wrangler types",

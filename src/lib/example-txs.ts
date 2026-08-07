@@ -16,10 +16,20 @@ export interface ExampleTx {
 }
 
 export const EXAMPLE_TXS: ExampleTx[] = [
+  // XLM first, deliberately: it's the only asset the wallet's send path can use
+  // out of the box, so a policy built from this example is the one that can
+  // actually be exercised end to end. Every other example pins a contract the
+  // wallet never calls, which looks like a broken policy rather than a
+  // mismatched one.
+  {
+    hash: "a89701dae79b722a09ecaf3276c50a2d540a2cc139db18037f9ec328b7d79f64",
+    label: "XLM transfer — matches the wallet's send path",
+    detail: "transfer(Address, Address, i128) on the native SAC — one delegated signer",
+  },
   {
     hash: "7b687754f86b27008efaea64e1bfa98b1d75e0b3b7bb24da4c2727d06cb71838",
     label: "USDC transfer",
-    detail: "transfer(Address, Address, i128) — one delegated signer",
+    detail: "transfer(Address, Address, i128) — one delegated signer; needs USDC in the wallet",
   },
   {
     hash: "536486a52a275ef2c7ce545c28faf2868c3c1503f8381a26c614caf547ed7114",
