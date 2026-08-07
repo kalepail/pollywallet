@@ -34,6 +34,9 @@ export const TESTNET_NATIVE_TOKEN_CONTRACT =
   "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 export const TESTNET_USDC_TOKEN_CONTRACT =
   "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
+/** Circle's classic USDC issuer on testnet — the trustline/path-payment side of the SAC above. */
+export const TESTNET_USDC_ISSUER =
+  "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
 /**
  * Tokens the wallet can send. Both are SACs wrapping classic assets, so both

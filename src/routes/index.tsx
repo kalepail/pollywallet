@@ -72,7 +72,7 @@ function App() {
     tokenCode, tokens,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setTokenCode, setSelectedRuleId,
-    handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
+    handleCreate, handleFund, handleFundUsdc, handleTransfer, handleDisconnect, handleCopy,
   } = useWallet();
 
   if (!wallet) {
@@ -116,14 +116,25 @@ function App() {
           </div>
         </div>
 
-        <button
-          onClick={handleFund}
-          disabled={loading}
-          className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
-        >
-          {loading ? <Loader size={20} /> : <Coins size={20} weight="bold" />}
-          Fund with Friendbot (XLM)
-        </button>
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={handleFund}
+            disabled={loading}
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
+          >
+            {loading ? <Loader size={20} /> : <Coins size={20} weight="bold" />}
+            Fund XLM
+          </button>
+          <button
+            onClick={handleFundUsdc}
+            disabled={loading}
+            title="Friendbots a throwaway account, swaps XLM for USDC on the SDEX, and sends it here"
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
+          >
+            {loading ? <Loader size={20} /> : <Coins size={20} weight="bold" />}
+            Get USDC
+          </button>
+        </div>
 
         <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
           <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">

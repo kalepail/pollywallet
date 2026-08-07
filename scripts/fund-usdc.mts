@@ -1,30 +1,26 @@
 /**
- * Get testnet USDC into a smart wallet (C... contract address).
+ * Get testnet USDC into a smart wallet (C... contract address), no Captcha.
  *
- * Circle's faucet is Captcha-gated and pays out to a classic G... account, so
- * the middle step can't be scripted. This handles both ends:
+ *   pnpm fund:usdc <wallet C...> [xlmToSwap]
  *
- *   pnpm fund:usdc prepare
- *     → generates a G account, friendbots it, adds the USDC trustline,
- *       and prints the address to paste into https://faucet.circle.com/
+ * Same three steps the "Get USDC" button runs in the UI: friendbot a throwaway
+ * classic account, swap XLM for USDC on the SDEX with a path payment, then
+ * SAC-transfer the proceeds into the wallet. The wallet is a contract address,
+ * so it holds the SAC balance directly and needs no trustline — only the
+ * throwaway account does.
  *
- *   USDC_SECRET=S... pnpm fund:usdc sweep <wallet C...> [amount]
- *     → moves the faucet's USDC from that G account into the smart wallet
- *
- * Contract addresses hold SAC balances directly, so the wallet itself needs no
- * trustline — only the intermediate G account does.
+ * The UI submits the final transfer through the relayer; this submits it
+ * directly, since a script has a funded source account of its own.
  */
 import {
-  Keypair, Horizon, Networks, TransactionBuilder, Operation, Asset, BASE_FEE,
+  Keypair, Networks, TransactionBuilder, Operation, Asset, BASE_FEE,
   Contract, Address, xdr, rpc, scValToNative,
 } from "@stellar/stellar-sdk";
-import { TESTNET_USDC_TOKEN_CONTRACT } from "../src/lib/passkey.ts";
-import { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "../src/lib/constants.ts";
+import { TESTNET_USDC_TOKEN_CONTRACT, TESTNET_USDC_ISSUER } from "../src/lib/passkey.ts";
+import { TESTNET_RPC_URL, TESTNET_HORIZON_URL } from "../src/lib/constants.ts";
 
-/** Circle's classic USDC issuer on Stellar testnet (matches the SAC's name()). */
-const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 const FRIENDBOT = "https://friendbot.stellar.org";
-const horizon = new Horizon.Server("https://horizon-testnet.stellar.org");
+const SLIPPAGE = 0.98;
 const server = new rpc.Server(TESTNET_RPC_URL);
 
 function toI128(value: bigint): xdr.ScVal {
@@ -36,60 +32,62 @@ function toI128(value: bigint): xdr.ScVal {
   );
 }
 
-async function prepare() {
+async function fundUsdc(walletContractId: string, xlmToSwap: string) {
   const kp = Keypair.random();
-  console.log(`Funding ${kp.publicKey()} with friendbot…`);
-  const res = await fetch(`${FRIENDBOT}?addr=${kp.publicKey()}`);
-  if (!res.ok) throw new Error(`Friendbot failed: ${res.status}`);
+  console.log(`Friendbotting ${kp.publicKey()}…`);
+  const funded = await fetch(`${FRIENDBOT}?addr=${kp.publicKey()}`);
+  if (!funded.ok) throw new Error(`Friendbot failed: ${funded.status}`);
 
-  console.log("Adding USDC trustline…");
-  const account = await horizon.loadAccount(kp.publicKey());
-  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
-    .addOperation(Operation.changeTrust({ asset: new Asset("USDC", USDC_ISSUER) }))
+  const usdc = new Asset("USDC", TESTNET_USDC_ISSUER);
+  const quoteRes = await fetch(
+    `${TESTNET_HORIZON_URL}/paths/strict-send?source_asset_type=native` +
+    `&source_amount=${xlmToSwap}&destination_assets=USDC%3A${TESTNET_USDC_ISSUER}`
+  );
+  const quote = (await quoteRes.json()) as any;
+  const best = quote?._embedded?.records?.[0];
+  if (!best) throw new Error("No XLM → USDC path on testnet right now");
+  const destMin = (Number(best.destination_amount) * SLIPPAGE).toFixed(7);
+  console.log(`Quote: ${xlmToSwap} XLM → ${best.destination_amount} USDC (floor ${destMin})`);
+
+  const account = await server.getAccount(kp.publicKey());
+  const swapTx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+    .addOperation(Operation.changeTrust({ asset: usdc }))
+    .addOperation(Operation.pathPaymentStrictSend({
+      sendAsset: Asset.native(),
+      sendAmount: xlmToSwap,
+      destination: kp.publicKey(),
+      destAsset: usdc,
+      destMin,
+      path: (best.path ?? []).map((a: any) =>
+        a.asset_type === "native" ? Asset.native() : new Asset(a.asset_code, a.asset_issuer)
+      ),
+    }))
     .setTimeout(60)
     .build();
-  tx.sign(kp);
-  await horizon.submitTransaction(tx);
+  swapTx.sign(kp);
 
-  console.log(`
-Trustline ready. Now do the one manual step:
+  const swapSent = await server.sendTransaction(swapTx);
+  if (swapSent.status === "ERROR") throw new Error(`Swap rejected: ${JSON.stringify(swapSent.errorResult)}`);
+  const swapFinal = await server.pollTransaction(swapSent.hash, { attempts: 20 });
+  if (swapFinal.status !== "SUCCESS") throw new Error(`Swap failed: ${swapFinal.status}`);
+  console.log(`Swap ok: ${swapSent.hash}`);
 
-  1. Open   https://faucet.circle.com/
-  2. Select Stellar Testnet
-  3. Paste  ${kp.publicKey()}
-
-Then sweep it into your smart wallet:
-
-  USDC_SECRET=${kp.secret()} pnpm fund:usdc sweep <your C... wallet>
-`);
-}
-
-async function sweep(walletContractId: string, amountArg?: string) {
-  const secret = process.env.USDC_SECRET;
-  if (!secret) throw new Error("Set USDC_SECRET to the S... key printed by `prepare`");
-  const kp = Keypair.fromSecret(secret);
-
-  const account = await horizon.loadAccount(kp.publicKey());
-  const held = account.balances.find(
-    (b: any) => b.asset_code === "USDC" && b.asset_issuer === USDC_ISSUER
+  const accountJson = (await (await fetch(`${TESTNET_HORIZON_URL}/accounts/${kp.publicKey()}`)).json()) as any;
+  const held = accountJson.balances?.find(
+    (b: any) => b.asset_code === "USDC" && b.asset_issuer === TESTNET_USDC_ISSUER
   );
-  const heldUnits = BigInt(Math.round(Number(held?.balance ?? 0) * 1e7));
-  if (heldUnits === 0n) {
-    throw new Error(`${kp.publicKey()} holds no USDC yet — run the Circle faucet step first.`);
-  }
-
-  const amount = amountArg ? BigInt(Math.round(Number(amountArg) * 1e7)) : heldUnits;
-  if (amount > heldUnits) throw new Error(`Only ${held?.balance} USDC available`);
-  console.log(`Transferring ${Number(amount) / 1e7} USDC → ${walletContractId}`);
+  const stroops = BigInt(Math.floor(Number(held?.balance ?? 0) * 1e7));
+  if (stroops === 0n) throw new Error("Swap settled but produced no USDC");
+  console.log(`Received ${held.balance} USDC — transferring to ${walletContractId}…`);
 
   const source = await server.getAccount(kp.publicKey());
-  const built = new TransactionBuilder(source, { fee: "1000000", networkPassphrase: TESTNET_NETWORK_PASSPHRASE })
+  const built = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
     .addOperation(
       new Contract(TESTNET_USDC_TOKEN_CONTRACT).call(
         "transfer",
         new Address(kp.publicKey()).toScVal(),
         new Address(walletContractId).toScVal(),
-        toI128(amount)
+        toI128(stroops)
       )
     )
     .setTimeout(60)
@@ -101,10 +99,10 @@ async function sweep(walletContractId: string, amountArg?: string) {
   prepared.sign(kp);
 
   const sent = await server.sendTransaction(prepared);
-  if (sent.status === "ERROR") throw new Error(`Submit failed: ${JSON.stringify(sent.errorResult)}`);
+  if (sent.status === "ERROR") throw new Error(`Transfer rejected: ${JSON.stringify(sent.errorResult)}`);
   const final = await server.pollTransaction(sent.hash, { attempts: 20 });
   if (final.status !== "SUCCESS") throw new Error(`Transfer failed: ${final.status}`);
-  console.log(`Done: ${sent.hash}`);
+  console.log(`Transfer ok: ${sent.hash}`);
 
   const key = xdr.ScVal.scvVec([
     xdr.ScVal.scvSymbol("Balance"),
@@ -116,12 +114,9 @@ async function sweep(walletContractId: string, amountArg?: string) {
   console.log(`Wallet USDC balance: ${Number(balance) / 1e7}`);
 }
 
-const [command, ...rest] = process.argv.slice(2);
-if (command === "prepare") await prepare();
-else if (command === "sweep") {
-  if (!rest[0]) throw new Error("Usage: fund:usdc sweep <wallet C...> [amount]");
-  await sweep(rest[0], rest[1]);
-} else {
-  console.log("Usage:\n  pnpm fund:usdc prepare\n  USDC_SECRET=S... pnpm fund:usdc sweep <wallet C...> [amount]");
+const [walletId, xlm = "100"] = process.argv.slice(2);
+if (!walletId) {
+  console.log("Usage: pnpm fund:usdc <wallet C...> [xlmToSwap]");
   process.exit(1);
 }
+await fundUsdc(walletId, xlm);

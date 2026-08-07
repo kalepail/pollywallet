@@ -10,6 +10,7 @@ import {
   TransactionBuilder,
   Operation,
   StrKey,
+  Asset,
   scValToNative,
 } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
@@ -36,6 +37,8 @@ import {
   TESTNET_WEBAUTHN_VERIFIER,
   TESTNET_ED25519_VERIFIER,
   TESTNET_NATIVE_TOKEN_CONTRACT,
+  TESTNET_USDC_TOKEN_CONTRACT,
+  TESTNET_USDC_ISSUER,
   FRIENDBOT_URL,
   DEPLOYER_PUBLIC_KEY,
   LEDGERS_PER_HOUR,
@@ -45,12 +48,18 @@ import {
 } from "../lib/passkey";
 import type { StoredWallet, TokenCode } from "../lib/passkey";
 import { requestContextRules, type ContextRuleInfo } from "../lib/context-rules";
+import { TESTNET_HORIZON_URL } from "../lib/constants";
 
 const BASE_FEE = "1000000";
 const server = new rpc.Server(TESTNET_RPC_URL);
 
 /** Friendbot gives 10,000 XLM. Reserve 5 XLM in the temp account for the transfer fee + base reserve. */
 const FRIENDBOT_TRANSFER_XLM = 9_995n;
+
+/** XLM converted per USDC top-up. At testnet rates ~100 XLM buys ~180 USDC. */
+const USDC_SWAP_XLM = "100";
+/** Floor on the swap output, as a fraction of the quote, so a moving orderbook doesn't fail the tx. */
+const SWAP_SLIPPAGE = 0.98;
 
 /** Key for persisting ephemeral signer secrets in localStorage. */
 const EPHEMERAL_SIGNERS_KEY = "pollywallet:ephemeral-signers";
@@ -262,6 +271,118 @@ export function useWallet() {
       await fetchBalance(wallet.contractId, tokenContractFor(tokenCode));
       if (relayerResult.hash) setLastTxHash(relayerResult.hash);
       setStatus("Funded!");
+      setStatusKind("done");
+    } catch (err: any) {
+      setStatus(err.message || "Something went wrong");
+      setStatusKind("error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
+   * Get USDC into the wallet without Circle's Captcha-gated faucet: friendbot a
+   * throwaway classic account, swap XLM for USDC on the SDEX with a path
+   * payment, then SAC-transfer the proceeds in. The wallet is a contract
+   * address, so it holds the SAC balance directly and needs no trustline —
+   * only the throwaway account does.
+   */
+  const handleFundUsdc = async () => {
+    if (!wallet) return;
+    setLoading(true);
+    setStatus("Requesting testnet XLM...");
+    setStatusKind("busy");
+    setLastTxHash(null);
+
+    try {
+      const tempKeypair = Keypair.random();
+      const friendbotRes = await fetch(`${FRIENDBOT_URL}?addr=${tempKeypair.publicKey()}`);
+      if (!friendbotRes.ok) throw new Error("Friendbot failed");
+
+      setStatus("Quoting XLM → USDC...");
+      const usdc = new Asset("USDC", TESTNET_USDC_ISSUER);
+      const quoteRes = await fetch(
+        `${TESTNET_HORIZON_URL}/paths/strict-send?source_asset_type=native` +
+        `&source_amount=${USDC_SWAP_XLM}&destination_assets=USDC%3A${TESTNET_USDC_ISSUER}`
+      );
+      const quote = await quoteRes.json() as any;
+      const best = quote?._embedded?.records?.[0];
+      if (!best) throw new Error("No XLM → USDC path on testnet right now — try again shortly");
+      const destMin = (Number(best.destination_amount) * SWAP_SLIPPAGE).toFixed(7);
+
+      setStatus(`Swapping ${USDC_SWAP_XLM} XLM for ~${Number(best.destination_amount).toFixed(2)} USDC...`);
+      const tempAccount = await server.getAccount(tempKeypair.publicKey());
+      const swapTx = new TransactionBuilder(tempAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      })
+        .addOperation(Operation.changeTrust({ asset: usdc }))
+        .addOperation(Operation.pathPaymentStrictSend({
+          sendAsset: Asset.native(),
+          sendAmount: USDC_SWAP_XLM,
+          destination: tempKeypair.publicKey(),
+          destAsset: usdc,
+          destMin,
+          path: (best.path ?? []).map((a: any) =>
+            a.asset_type === "native" ? Asset.native() : new Asset(a.asset_code, a.asset_issuer)
+          ),
+        }))
+        .setTimeout(60)
+        .build();
+      swapTx.sign(tempKeypair);
+
+      const swapSent = await server.sendTransaction(swapTx);
+      if (swapSent.status === "ERROR") {
+        throw new Error(`Swap rejected: ${JSON.stringify(swapSent.errorResult)}`);
+      }
+      const swapFinal = await server.pollTransaction(swapSent.hash, { attempts: 20 });
+      if (swapFinal.status !== "SUCCESS") throw new Error(`Swap failed: ${swapFinal.status}`);
+
+      // Move everything the swap actually produced, not the quote — the fill can beat destMin.
+      const accountRes = await fetch(`${TESTNET_HORIZON_URL}/accounts/${tempKeypair.publicKey()}`);
+      const accountJson = await accountRes.json() as any;
+      const usdcBalance = accountJson.balances?.find(
+        (b: any) => b.asset_code === "USDC" && b.asset_issuer === TESTNET_USDC_ISSUER
+      );
+      const usdcStroops = BigInt(Math.floor(Number(usdcBalance?.balance ?? 0) * STROOPS_PER_XLM));
+      if (usdcStroops === 0n) throw new Error("Swap settled but produced no USDC");
+
+      setStatus("Transferring USDC to smart wallet...");
+      const hostFunc = buildSacTransferFunc(
+        tempKeypair.publicKey(), wallet.contractId, usdcStroops, TESTNET_USDC_TOKEN_CONTRACT
+      );
+
+      const sourceAccount = await server.getAccount(tempKeypair.publicKey());
+      const simTx = new TransactionBuilder(sourceAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      })
+        .addOperation(Operation.invokeHostFunction({ func: hostFunc, auth: [] }))
+        .setTimeout(30)
+        .build();
+
+      const simResult = await server.simulateTransaction(simTx);
+      if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
+      const simSuccess = simResult as rpc.Api.SimulateTransactionSuccessResponse;
+
+      const signedAuth = signKeypairAuthEntries(
+        simSuccess.result?.auth ?? [], tempKeypair,
+        simSuccess.latestLedger + LEDGERS_PER_HOUR, TESTNET_NETWORK_PASSPHRASE
+      );
+
+      const relayerResult = await requestSubmitToRelayer({
+        func: hostFunc.toXDR("base64"),
+        auth: signedAuth.map((e) => e.toXDR("base64")),
+      });
+      if (!relayerResult.success) throw new Error(relayerResult.error || "USDC transfer via relayer failed");
+      if (relayerResult.hash) {
+        await server.pollTransaction(relayerResult.hash, { attempts: 15 });
+        setLastTxHash(relayerResult.hash);
+      }
+
+      setTokenCode("USDC");
+      await fetchBalance(wallet.contractId, TESTNET_USDC_TOKEN_CONTRACT);
+      setStatus(`Received ${Number(usdcBalance.balance).toFixed(2)} USDC!`);
       setStatusKind("done");
     } catch (err: any) {
       setStatus(err.message || "Something went wrong");
@@ -493,15 +614,20 @@ export function useWallet() {
     tokenCode, tokens: TESTNET_TOKENS,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setTokenCode, setSelectedRuleId,
-    handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
+    handleCreate, handleFund, handleFundUsdc, handleTransfer, handleDisconnect, handleCopy,
     fetchRules,
   };
 }
 
-function buildSacTransferFunc(from: string, to: string, amount: bigint): xdr.HostFunction {
+function buildSacTransferFunc(
+  from: string,
+  to: string,
+  amount: bigint,
+  tokenContract: string = TESTNET_NATIVE_TOKEN_CONTRACT,
+): xdr.HostFunction {
   return xdr.HostFunction.hostFunctionTypeInvokeContract(
     new xdr.InvokeContractArgs({
-      contractAddress: Address.fromString(TESTNET_NATIVE_TOKEN_CONTRACT).toScAddress(),
+      contractAddress: Address.fromString(tokenContract).toScAddress(),
       functionName: "transfer",
       args: [
         xdr.ScVal.scvAddress(Address.fromString(from).toScAddress()),
