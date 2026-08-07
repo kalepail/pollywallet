@@ -24,6 +24,7 @@ jobs:
       - run: npx tsc --noEmit
       - run: pnpm test
       - run: pnpm build
+      - run: cp .dev.vars.example .dev.vars
       - run: npx wrangler types --check
       - run: pnpm check:model-catalog
         env:
