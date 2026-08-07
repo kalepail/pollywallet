@@ -1,4 +1,5 @@
 import { getSandbox, parseSSEStream, type ExecEvent, type Sandbox as SandboxType } from "@cloudflare/sandbox";
+import { parseTestOutput } from "./parse-test-output";
 
 export { Sandbox } from "@cloudflare/sandbox";
 
@@ -143,58 +144,6 @@ async function handleCompile(
       { status: 500 }
     );
   }
-}
-
-/** Parse `cargo test` output into per-test results. */
-function parseTestOutput(output: string, execSucceeded: boolean) {
-  const testCases: Array<{ name: string; passed: boolean; output: string }> = [];
-  const testLineRegex = /test (\S+) \.\.\. (ok|FAILED)/g;
-  let match;
-
-  while ((match = testLineRegex.exec(output)) !== null) {
-    testCases.push({
-      name: match[1],
-      passed: match[2] === "ok",
-      output: "",
-    });
-  }
-
-  // Extract per-test failure output from cargo test's stdout sections
-  // Format: "---- tests::test_name stdout ----\n...output...\n\n"
-  for (const tc of testCases) {
-    if (tc.passed) {
-      tc.output = "ok";
-      continue;
-    }
-    const sectionRegex = new RegExp(
-      `---- ${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} stdout ----\\n([\\s\\S]*?)(?=\\n\\n|$)`
-    );
-    const sectionMatch = output.match(sectionRegex);
-    if (sectionMatch) {
-      tc.output = sectionMatch[1].trim().slice(0, 2000);
-    } else {
-      // Try to find the panic message directly
-      const panicRegex = new RegExp(
-        `thread '${tc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' panicked at ([^\\n]+)`
-      );
-      const panicMatch = output.match(panicRegex);
-      tc.output = panicMatch ? panicMatch[0].slice(0, 2000) : "(test failed — no captured output)";
-    }
-  }
-
-  // Check if compilation succeeded (tests ran at all)
-  const compiled = output.includes("running") || output.includes("test result");
-  const hasRealError = output.includes("error[E") || output.includes("error: could not compile");
-  const success = execSucceeded && testCases.every((tc) => tc.passed);
-
-  // If not compiled and no real error, this was likely a timeout during
-  // dependency download / initial compilation. Report it clearly.
-  let compileOutput = output.slice(0, 5000);
-  if (!compiled && !hasRealError && !execSucceeded) {
-    compileOutput = "Build timed out (likely downloading dependencies on first run). Retrying should be faster.\n\n" + compileOutput;
-  }
-
-  return { success, compiled, testCases, compileOutput };
 }
 
 /**
