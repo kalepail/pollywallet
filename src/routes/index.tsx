@@ -69,8 +69,9 @@ function StatusPanel({
 function App() {
   const {
     wallet, balance, status, statusKind, lastTxHash, loading, copied, destination, amount,
+    tokenCode, tokens,
     contextRules, selectedRuleId, rulesLoading,
-    setDestination, setAmount, setSelectedRuleId,
+    setDestination, setAmount, setTokenCode, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
   } = useWallet();
 
@@ -105,7 +106,7 @@ function App() {
         <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
           <p className="text-sm text-gray-400 mb-1">Balance</p>
           <p className="text-4xl font-bold text-white">
-            {balance ?? "..."} <span className="text-lg text-gray-400">XLM</span>
+            {balance ?? "..."} <span className="text-lg text-gray-400">{tokenCode}</span>
           </p>
           <div className="mt-3 flex items-center gap-2">
             <code className="text-xs text-gray-500 truncate flex-1">{wallet.contractId}</code>
@@ -121,13 +122,13 @@ function App() {
           className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
         >
           {loading ? <Loader size={20} /> : <Coins size={20} weight="bold" />}
-          Fund with Friendbot
+          Fund with Friendbot (XLM)
         </button>
 
         <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
           <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
             <PaperPlaneTilt size={20} weight="bold" className="text-cyan-400" />
-            Send XLM
+            Send {tokenCode}
           </h2>
           <div className="space-y-3">
             <div>
@@ -139,9 +140,24 @@ function App() {
                 className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors" />
             </div>
             <div>
+              <label htmlFor="token" className="block text-xs text-gray-400 mb-1">
+                Asset
+              </label>
+              <select
+                id="token"
+                value={tokenCode}
+                onChange={(e) => setTokenCode(e.target.value as typeof tokenCode)}
+                className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-xl text-white focus:outline-none focus:border-cyan-500 transition-colors"
+              >
+                {tokens.map((t) => (
+                  <option key={t.code} value={t.code}>{t.code}</option>
+                ))}
+              </select>
+            </div>
+            <div>
               <div className="flex items-baseline justify-between mb-1">
                 <label htmlFor="amount" className="block text-xs text-gray-400">
-                  Amount (XLM)
+                  Amount ({tokenCode})
                 </label>
                 {balance != null && (
                   <button

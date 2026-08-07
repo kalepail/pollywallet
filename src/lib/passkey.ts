@@ -32,6 +32,24 @@ export const TESTNET_ED25519_VERIFIER =
   "CCINZKKTMDWH2RNUVQOIZP2S2TIQR73VZYU7G6M5ZW64UTJCPYMDHKO4";
 export const TESTNET_NATIVE_TOKEN_CONTRACT =
   "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+export const TESTNET_USDC_TOKEN_CONTRACT =
+  "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
+
+/**
+ * Tokens the wallet can send. Both are SACs wrapping classic assets, so both
+ * use 7 decimals and share STROOPS_PER_XLM — add a `decimals` field here before
+ * listing a native Soroban token that doesn't.
+ */
+export const TESTNET_TOKENS = [
+  { code: "XLM", contractId: TESTNET_NATIVE_TOKEN_CONTRACT },
+  { code: "USDC", contractId: TESTNET_USDC_TOKEN_CONTRACT },
+] as const;
+
+export type TokenCode = (typeof TESTNET_TOKENS)[number]["code"];
+
+export function tokenContractFor(code: TokenCode): string {
+  return TESTNET_TOKENS.find((t) => t.code === code)!.contractId;
+}
 export const FRIENDBOT_URL = "https://friendbot.stellar.org";
 export const LEDGERS_PER_HOUR = 720;
 export const STROOPS_PER_XLM = 10_000_000;

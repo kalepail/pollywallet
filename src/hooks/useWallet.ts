@@ -40,8 +40,10 @@ import {
   DEPLOYER_PUBLIC_KEY,
   LEDGERS_PER_HOUR,
   STROOPS_PER_XLM,
+  TESTNET_TOKENS,
+  tokenContractFor,
 } from "../lib/passkey";
-import type { StoredWallet } from "../lib/passkey";
+import type { StoredWallet, TokenCode } from "../lib/passkey";
 import { requestContextRules, type ContextRuleInfo } from "../lib/context-rules";
 
 const BASE_FEE = "1000000";
@@ -72,6 +74,7 @@ export function useWallet() {
   const [copied, setCopied] = useState(false);
   const [destination, setDestination] = useState("");
   const [amount, setAmount] = useState("");
+  const [tokenCode, setTokenCode] = useState<TokenCode>("XLM");
   const [contextRules, setContextRules] = useState<ContextRuleInfo[]>([]);
   const [selectedRuleId, setSelectedRuleId] = useState<number>(0);
   const [rulesLoading, setRulesLoading] = useState(false);
@@ -97,13 +100,13 @@ export function useWallet() {
     if (wallet) fetchRules(wallet.contractId);
   }, [wallet, fetchRules]);
 
-  const fetchBalance = useCallback(async (contractId: string) => {
+  const fetchBalance = useCallback(async (contractId: string, token: string) => {
     try {
       const balanceKey = xdr.ScVal.scvVec([
         xdr.ScVal.scvSymbol("Balance"),
         xdr.ScVal.scvAddress(Address.fromString(contractId).toScAddress()),
       ]);
-      const data = await server.getContractData(TESTNET_NATIVE_TOKEN_CONTRACT, balanceKey);
+      const data = await server.getContractData(token, balanceKey);
       const parsed = scValToNative(data.val.contractData().val());
       const amount = typeof parsed === "object" && parsed.amount != null
         ? BigInt(parsed.amount)
@@ -116,8 +119,8 @@ export function useWallet() {
 
   // TODO: Add periodic polling or subscription so balance updates on external receives.
   useEffect(() => {
-    if (wallet) fetchBalance(wallet.contractId);
-  }, [wallet, fetchBalance]);
+    if (wallet) fetchBalance(wallet.contractId, tokenContractFor(tokenCode));
+  }, [wallet, tokenCode, fetchBalance]);
 
   const handleCreate = async () => {
     setLoading(true);
@@ -256,7 +259,7 @@ export function useWallet() {
         await server.pollTransaction(relayerResult.hash, { attempts: 15 });
       }
 
-      await fetchBalance(wallet.contractId);
+      await fetchBalance(wallet.contractId, tokenContractFor(tokenCode));
       if (relayerResult.hash) setLastTxHash(relayerResult.hash);
       setStatus("Funded!");
       setStatusKind("done");
@@ -281,11 +284,13 @@ export function useWallet() {
       }
 
       const amountStroops = parseXlmToStroops(amount);
+      // Both listed tokens are 7-decimal SACs, so the XLM stroop math applies to both.
+      const tokenContract = tokenContractFor(tokenCode);
 
       if (balance !== null) {
         const balanceStroops = parseXlmToStroops(balance);
         if (amountStroops > balanceStroops) {
-          throw new Error(`Insufficient balance: you have ${balance} XLM`);
+          throw new Error(`Insufficient balance: you have ${balance} ${tokenCode}`);
         }
       }
 
@@ -307,7 +312,7 @@ export function useWallet() {
         // SAC calling require_auth(wallet) inside transfer()
         hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
           new xdr.InvokeContractArgs({
-            contractAddress: Address.fromString(TESTNET_NATIVE_TOKEN_CONTRACT).toScAddress(),
+            contractAddress: Address.fromString(tokenContract).toScAddress(),
             functionName: "transfer",
             args: [
               xdr.ScVal.scvAddress(Address.fromString(wallet.contractId).toScAddress()),
@@ -323,7 +328,7 @@ export function useWallet() {
             contractAddress: Address.fromString(wallet.contractId).toScAddress(),
             functionName: "execute",
             args: [
-              xdr.ScVal.scvAddress(Address.fromString(TESTNET_NATIVE_TOKEN_CONTRACT).toScAddress()),
+              xdr.ScVal.scvAddress(Address.fromString(tokenContract).toScAddress()),
               xdr.ScVal.scvSymbol("transfer"),
               xdr.ScVal.scvVec([
                 xdr.ScVal.scvAddress(Address.fromString(wallet.contractId).toScAddress()),
@@ -452,7 +457,7 @@ export function useWallet() {
         await server.pollTransaction(relayerResult.hash, { attempts: 15 });
       }
 
-      await fetchBalance(wallet.contractId);
+      await fetchBalance(wallet.contractId, tokenContractFor(tokenCode));
       if (relayerResult.hash) setLastTxHash(relayerResult.hash);
       setAmount("");
       setDestination("");
@@ -485,8 +490,9 @@ export function useWallet() {
 
   return {
     wallet, balance, status, statusKind, lastTxHash, loading, copied, destination, amount,
+    tokenCode, tokens: TESTNET_TOKENS,
     contextRules, selectedRuleId, rulesLoading,
-    setDestination, setAmount, setSelectedRuleId,
+    setDestination, setAmount, setTokenCode, setSelectedRuleId,
     handleCreate, handleFund, handleTransfer, handleDisconnect, handleCopy,
     fetchRules,
   };
