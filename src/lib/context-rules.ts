@@ -7,6 +7,7 @@ export interface ContextRuleInfo {
   name: string;
   contextType: "Default" | "CallContract" | "CreateContract";
   targetContract?: string;
+  wasmHash?: string;
   signers: Array<{ type: "Delegated" | "External"; address: string; keyData?: Uint8Array }>;
   signerIds: number[];
   policies: string[];
@@ -98,6 +99,7 @@ export async function requestContextRules(walletContractId: string): Promise<{
 
         let contextType: ContextRuleInfo["contextType"] = "Default";
         let targetContract: string | undefined;
+        let wasmHash: string | undefined;
 
         if (Array.isArray(rule.context_type)) {
           const [tag, value] = rule.context_type;
@@ -106,6 +108,12 @@ export async function requestContextRules(walletContractId: string): Promise<{
             targetContract = typeof value === "string" ? value : undefined;
           } else if (tag === "CreateContract") {
             contextType = "CreateContract";
+            const bytes: ArrayLike<number> | undefined = ArrayBuffer.isView(value) ? value
+              : (value?.type === "Buffer" && Array.isArray(value.data)) ? value.data
+                : undefined;
+            wasmHash = bytes
+              ? Array.from(bytes, (byte: number) => byte.toString(16).padStart(2, "0")).join("")
+              : undefined;
           }
         }
 
@@ -136,6 +144,7 @@ export async function requestContextRules(walletContractId: string): Promise<{
           name: rule.name ?? `Rule ${id}`,
           contextType,
           targetContract,
+          wasmHash,
           signers,
           signerIds,
           policies,

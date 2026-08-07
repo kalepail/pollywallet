@@ -502,6 +502,72 @@ EOF
   check_contains "delete cancel preserves fixture rule" "$fixture_name" "$fixture_body"
   pass "delete submission deliberately not executed; reusable fixture preserved"
 
+  echo ""
+  echo "=== CreateContract fault injection: RENDERING ONLY, not an on-chain lifecycle ==="
+  local create_rule_xdr fixture_name_json
+  create_rule_xdr="$(FIXTURE_RULE="$fixture_rule" FIXTURE_NAME="$fixture_name" node --input-type=module <<'NODE'
+import { xdr } from "@stellar/stellar-sdk";
+
+const field = (key, val) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(key), val });
+const fields = {
+  id: xdr.ScVal.scvU32(Number(process.env.FIXTURE_RULE)),
+  name: xdr.ScVal.scvString(process.env.FIXTURE_NAME),
+  context_type: xdr.ScVal.scvVec([
+    xdr.ScVal.scvSymbol("CreateContract"),
+    xdr.ScVal.scvBytes(Buffer.from(Array.from({ length: 32 }, (_, i) => i))),
+  ]),
+  signers: xdr.ScVal.scvVec([]),
+  signer_ids: xdr.ScVal.scvVec([]),
+  policies: xdr.ScVal.scvVec([]),
+  policy_ids: xdr.ScVal.scvVec([]),
+  valid_until: xdr.ScVal.scvVoid(),
+};
+const rule = xdr.ScVal.scvMap(Object.entries(fields)
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([key, val]) => field(key, val)));
+process.stdout.write(rule.toXDR("base64"));
+NODE
+  )"
+  fixture_name_json="$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$fixture_name")"
+  ab find role link click --name Policies >/dev/null
+  wait_text "Add Transaction Hashes" 30000 || fail "could not reach Policies before CreateContract render fixture"
+  ab eval --stdin >/dev/null <<EOF
+window.__pwOriginalFetch = window.fetch.bind(window);
+window.__pwCreateMocked = false;
+window.fetch = async (...args) => {
+  const response = await window.__pwOriginalFetch(...args);
+  const payload = await response.clone().json().catch(() => null);
+  const resultXdr = payload?.result?.results?.[0]?.xdr;
+  if (!window.__pwCreateMocked && resultXdr && atob(resultXdr).includes($fixture_name_json)) {
+    payload.result.results[0].xdr = "$create_rule_xdr";
+    window.__pwCreateMocked = true;
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    headers.delete("content-encoding");
+    return new Response(JSON.stringify(payload), {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
+  return response;
+};
+"CreateContract render mock installed";
+EOF
+  ab find role link click --name Rules >/dev/null
+  ab wait --load networkidle >/dev/null
+  if wait_text "CreateContract" 60000; then
+    fixture_body="$(body)"
+    check_contains "RENDERING ONLY: injected CreateContract badge" "CreateContract" "$fixture_body"
+    check_contains "RENDERING ONLY: injected WASM hash" "WASM: 00010203...1c1d1e1f" "$fixture_body"
+    check_not_contains "render fixture does not retain CallContract badge" "CallContract" "$fixture_body"
+    check_eq "CreateContract fixture intercepted the rule response" "true" "$(ab eval 'window.__pwCreateMocked')"
+  else
+    fail "RENDERING ONLY: injected CreateContract badge did not render"
+    echo "$(body)"
+  fi
+  ab eval 'window.fetch = window.__pwOriginalFetch; delete window.__pwOriginalFetch; delete window.__pwCreateMocked' >/dev/null
+
   skip "expired rendering: client validation prevents submitting an already-expired ledger"
 
   echo ""
@@ -516,7 +582,7 @@ if [[ "${1:-}" == "--inner" ]]; then
 fi
 
 INPUT_URL="${1:-http://localhost:4173}"
-SESSION="skip1-fixture"
+SESSION="cc-coverage"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_URL="${INPUT_URL%/}"
 BASE_URL="${BASE_URL%/rules}"

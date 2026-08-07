@@ -119,6 +119,7 @@ export default function RuleCard({
   const isExpired = rule.validUntil != null && rule.validUntil <= latestLedger;
   const isDefault = rule.contextType === "Default" && rule.policies.length === 0;
   const isProcessing = actionInProgress !== null;
+  const target = rule.targetContract ?? rule.wasmHash;
 
   const handleRenameSubmit = () => {
     const trimmed = nameInputRef.current?.value.trim() ?? newName.trim();
@@ -224,9 +225,9 @@ export default function RuleCard({
               </Badge>
             )}
           </div>
-          {rule.targetContract && (
+          {target && (
             <p className="text-xs text-gray-500 mt-1 font-mono truncate">
-              Target: {truncateAddress(rule.targetContract)}
+              {rule.targetContract ? "Target" : "WASM"}: {truncateAddress(target)}
             </p>
           )}
         </div>
@@ -239,14 +240,16 @@ export default function RuleCard({
       {expanded && (
         <div className="border-t border-slate-700/60 px-5 py-4 space-y-4">
           {/* Target Contract */}
-          {rule.targetContract && (
+          {target && (
             <div>
-              <p className="text-xs text-gray-400 mb-1 font-medium">Target Contract</p>
+              <p className="text-xs text-gray-400 mb-1 font-medium">
+                {rule.targetContract ? "Target Contract" : "WASM Hash"}
+              </p>
               <div className="flex items-center gap-2">
                 <code className="text-xs text-gray-300 font-mono break-all">
-                  {rule.targetContract}
+                  {target}
                 </code>
-                <CopyButton text={rule.targetContract} />
+                <CopyButton text={target} />
               </div>
             </div>
           )}

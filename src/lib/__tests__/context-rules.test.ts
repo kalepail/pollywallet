@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 
 import { requestContextRules } from "../context-rules";
+import RuleCard from "../../components/rules/RuleCard";
 
 const simulateTransaction = vi.spyOn(rpc.Server.prototype, "simulateTransaction");
 const getContractInstance = vi.spyOn(rpc.Server.prototype, "getContractInstance");
@@ -9,6 +12,8 @@ const getContractInstance = vi.spyOn(rpc.Server.prototype, "getContractInstance"
 const WALLET = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 const TARGET = "CCMR63YE5T7MPWREF3PC5XNTTGXFSB4GYUGUIT5POHP2UGCS65TBIUUU";
 const SIGNER = "GAAH4OT36RRCCAGKARGPN2HLHT2NOBVFHO4GUHA6CF7UKQ4MMV24WQ4N";
+const WASM_HASH = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
+const WASM_HASH_HEX = WASM_HASH.toString("hex");
 type SimulationResponse = Awaited<ReturnType<typeof rpc.Server.prototype.simulateTransaction>>;
 
 vi.spyOn(Keypair, "random").mockReturnValue({
@@ -96,6 +101,7 @@ describe("requestContextRules", () => {
       .mockResolvedValueOnce(success(xdr.ScVal.scvVoid()))
       .mockResolvedValueOnce(success(rule(3, xdr.ScVal.scvVec([
         xdr.ScVal.scvSymbol("CreateContract"),
+        xdr.ScVal.scvBytes(WASM_HASH),
       ]))));
 
     const result = await requestContextRules(WALLET);
@@ -109,6 +115,7 @@ describe("requestContextRules", () => {
           name: "Rule 1",
           contextType: "CallContract",
           targetContract: TARGET,
+          wasmHash: undefined,
           signers: [{ type: "External", address: SIGNER, keyData: undefined }],
           signerIds: [9],
           policies: [TARGET],
@@ -120,6 +127,7 @@ describe("requestContextRules", () => {
           name: "Rule 3",
           contextType: "CreateContract",
           targetContract: undefined,
+          wasmHash: WASM_HASH_HEX,
           signers: [{ type: "External", address: SIGNER, keyData: undefined }],
           signerIds: [9],
           policies: [TARGET],
@@ -149,6 +157,7 @@ describe("requestContextRules", () => {
         name: "Default",
         contextType: "Default",
         targetContract: undefined,
+        wasmHash: undefined,
         signers: [],
         signerIds: [],
         policies: [],
@@ -156,6 +165,40 @@ describe("requestContextRules", () => {
         validUntil: undefined,
       }],
     });
+  });
+
+  it("renders a CreateContract WASM hash truncated and copyable", () => {
+    const writeText = vi.fn();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(createElement(RuleCard, {
+      rule: {
+        id: 3,
+        name: "Create rule",
+        contextType: "CreateContract",
+        wasmHash: WASM_HASH_HEX,
+        signers: [],
+        signerIds: [],
+        policies: [],
+        policyIds: [],
+      },
+      latestLedger: 100,
+      policyMeta: new Map(),
+      actionInProgress: null,
+      onRename: vi.fn(),
+      onDelete: vi.fn(),
+      onUpdateExpiration: vi.fn(),
+    }));
+
+    expect(screen.getByText("WASM: 00010203...1c1d1e1f")).toBeTruthy();
+    fireEvent.click(screen.getByRole("heading", { name: "Create rule" }));
+    expect(screen.getByText("WASM Hash")).toBeTruthy();
+    expect(screen.getByText(WASM_HASH_HEX)).toBeTruthy();
+    fireEvent.click(screen.getByTitle("Copy"));
+    expect(writeText).toHaveBeenCalledWith(WASM_HASH_HEX);
+    cleanup();
   });
 
   it("finds an active rule beyond the old fixed sparse-ID scan window", async () => {
