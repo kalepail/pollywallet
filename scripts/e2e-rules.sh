@@ -96,6 +96,14 @@ run_inner() {
     return 1
   }
 
+  click_copy_number() {
+    local number="$1" snapshot button_ref
+    snapshot="$(snap)"
+    button_ref="$(grep -F 'button "Copy"' <<<"$snapshot" | sed -n "${number}p" | grep -o 'e[0-9][0-9]*' | tail -1)"
+    [[ -n "$button_ref" ]] || return 1
+    ab click "@$button_ref" >/dev/null
+  }
+
   echo ""
   echo "=== Wallet fixture: real testnet wallet with virtual WebAuthn ==="
   if ! wait_text "Create Smart Wallet" 30000 || ! click_button "Create Smart Wallet"; then
@@ -426,9 +434,74 @@ EOF
   ab wait --load networkidle >/dev/null
   wait_text "$name20" 60000 || fail "rules did not recover after restoring the real RPC response"
 
-  skip "delete confirmation/cancel/submission: the only real rule is the undeletable default rule"
-  skip "target-contract copy and CallContract/CreateContract badges: no non-default on-chain rule exists"
-  skip "policy address copy, metadata, source expand/hide/copy: no installed policy exists on this wallet"
+  echo ""
+  echo "=== Reusable fixture: non-default rule and installed policy ==="
+  local fixture_wallet fixture_target fixture_policy fixture_rule fixture_name
+  IFS=$'\t' read -r fixture_wallet fixture_target fixture_policy fixture_rule fixture_name < <(
+    FIXTURE_FILE="$FIXTURE_FILE" node -e 'const f=JSON.parse(require("node:fs").readFileSync(process.env.FIXTURE_FILE)); process.stdout.write([f.walletContractId,f.targetContractId,f.policyContractId,f.contextRuleId,f.ruleName].join("\t"))'
+  )
+
+  ab eval "localStorage.setItem('pollywallet:wallet', JSON.stringify({credentialId:'fixture-read-only',contractId:'$fixture_wallet',publicKey:''}))" >/dev/null
+  ab open "$base_url/rules" >/dev/null
+  ab wait --load networkidle >/dev/null
+  if wait_text "$fixture_name" 120000; then
+    local fixture_body meta_date source_body
+    fixture_body="$(body)"
+    check_contains "fixture rule id" "#$fixture_rule" "$fixture_body"
+    check_contains "CallContract badge" "CallContract" "$fixture_body"
+    check_not_contains "fixture does not mislabel CallContract as CreateContract" "CreateContract" "$fixture_body"
+    check_contains "fixture policy count" "1 policy" "$fixture_body"
+  else
+    fail "fixture rule '$fixture_name' did not render"
+    echo "$(body)"
+    return 1
+  fi
+
+  ab find role heading click --name "$fixture_name" >/dev/null
+  wait_text "Target Contract" 30000 || fail "fixture rule did not expand"
+  fixture_body="$(body)"
+  check_contains "concrete target contract" "$fixture_target" "$fixture_body"
+  check_contains "installed policy metadata name" "$fixture_name" "$fixture_body"
+  meta_date="$(ab eval "document.querySelector('span[title=\"$fixture_name\"]')?.nextElementSibling?.textContent || ''" | tr -d '"')"
+  if [[ "$meta_date" =~ ^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$ ]]; then
+    pass "installed policy deployment metadata -> $meta_date"
+  else
+    fail "installed policy deployment date missing, got '$meta_date'"
+  fi
+
+  ab eval 'Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async text=>{window.__fixtureCopied=text}}}); window.__fixtureCopied=""' >/dev/null
+  if click_copy_number 1; then
+    check_eq "target-contract copy payload" "true" "$(ab eval "window.__fixtureCopied === '$fixture_target'")"
+  else
+    fail "target-contract Copy button missing"
+  fi
+  if click_copy_number 3; then
+    check_eq "concrete policy-address copy payload" "true" "$(ab eval "window.__fixtureCopied === '$fixture_policy'")"
+  else
+    fail "policy-address Copy button missing"
+  fi
+
+  ab find role button click --name Code >/dev/null
+  wait_text "Rust source" 30000 || fail "policy source did not expand"
+  source_body="$(body)"
+  check_contains "real Rust source contract" "pub struct PolicyContract" "$source_body"
+  check_contains "real Rust source error enum" "pub enum PolicyError" "$source_body"
+  if click_copy_number 4; then
+    check_eq "Rust source copy payload" "true" "$(ab eval 'window.__fixtureCopied === document.querySelector("pre")?.textContent')"
+  else
+    fail "Rust source Copy button missing"
+  fi
+  ab find role button click --name Hide >/dev/null
+  check_not_contains "Hide collapses Rust source" "Rust source" "$(body)"
+
+  ab find role button click --name Delete >/dev/null
+  check_contains "delete confirmation" "Delete this rule?" "$(body)"
+  ab find role button click --name Cancel >/dev/null
+  fixture_body="$(body)"
+  check_not_contains "delete cancel closes confirmation" "Delete this rule?" "$fixture_body"
+  check_contains "delete cancel preserves fixture rule" "$fixture_name" "$fixture_body"
+  pass "delete submission deliberately not executed; reusable fixture preserved"
+
   skip "expired rendering: client validation prevents submitting an already-expired ledger"
 
   echo ""
@@ -443,7 +516,7 @@ if [[ "${1:-}" == "--inner" ]]; then
 fi
 
 INPUT_URL="${1:-http://localhost:4173}"
-SESSION="e2e2-rules"
+SESSION="skip1-fixture"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_URL="${INPUT_URL%/}"
 BASE_URL="${BASE_URL%/rules}"
@@ -453,6 +526,7 @@ export SESSION
 export AGENT_BROWSER_IDLE_TIMEOUT_MS=600000
 export WEBAUTHN_EVENTS_FILE="$ARTIFACT_DIR/webauthn.jsonl"
 export RULES_HAR="$ARTIFACT_DIR/rules.har"
+export FIXTURE_FILE="${E2E_FIXTURE_FILE:-$SCRIPT_DIR/.e2e-fixture.json}"
 
 cleanup() {
   agent-browser --session "$SESSION" close 2>/dev/null || true
@@ -460,6 +534,9 @@ cleanup() {
   rmdir "$ARTIFACT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+bash "$SCRIPT_DIR/e2e-fixture.sh" "$BASE_URL"
+agent-browser --session "$SESSION" close 2>/dev/null || true
 
 echo "=== No-wallet route gate ==="
 agent-browser --session "$SESSION" open "$BASE_URL/" >/dev/null
