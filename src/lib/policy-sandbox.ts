@@ -923,7 +923,15 @@ function validateTestInput(data: unknown): TestInput {
     throw new Error("rustCode exceeds maximum size");
   }
   if (typeof schemaJson !== "string" || schemaJson.length === 0) {
-    throw new Error("schemaJson is required");
+    // A client that omits schemaJson is almost always a STALE BUNDLE: this endpoint used to
+    // accept caller-supplied `testCode`, and a page loaded before that change still sends it.
+    // Say so, rather than surfacing an internal field name. Do NOT restore the testCode path
+    // to be lenient here — accepting caller-supplied tests is exactly the bypass that made
+    // the suite advisory instead of a gate.
+    throw new Error(
+      "This page is out of date — reload to continue. (The test endpoint now takes a policy "
+      + "schema and generates its own tests server-side.)"
+    );
   }
   if (schemaJson.length > 50_000) {
     throw new Error("schemaJson exceeds maximum size");

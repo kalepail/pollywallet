@@ -1,8 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 
+// Apply the input validator, as the real runtime does. A mock that drops it silently exempts
+// every server function's validation from these tests — including the check that keeps
+// caller-supplied test code out of the sandbox.
 vi.mock("@tanstack/react-start", () => ({
   createServerFn: () => ({
-    inputValidator: () => ({ handler: (fn: any) => fn }),
+    inputValidator: (validate: (data: unknown) => unknown) => ({
+      handler: (handler: (args: any) => unknown) => (args: any) =>
+        handler({ ...args, data: validate(args?.data) }),
+    }),
   }),
 }));
 
@@ -296,5 +302,22 @@ describe("install params are emitted in ascending key order", () => {
     expect(keys).toEqual([...keys].sort());
     // Schema order would have been max_amount, min_amount, max_fee, min_fee.
     expect(keys).toEqual(["max_amount", "max_fee", "min_amount", "min_fee", "threshold"]);
+  });
+});
+
+// A page loaded before tests moved server-side still posts `testCode` and no `schemaJson`.
+// That must fail (accepting testCode is the bypass), but the message has to be actionable
+// rather than naming an internal field.
+describe("stale client bundles get an actionable error", () => {
+  it("tells the user to reload instead of surfacing a field name", async () => {
+    const { streamPolicyTest } = await import("../policy-sandbox");
+    const chunks: any[] = [];
+    await expect(
+      (async () => {
+        for await (const c of await streamPolicyTest({
+          data: { rustCode: "fn main() {}", testCode: "" } as any,
+        })) chunks.push(c);
+      })(),
+    ).rejects.toThrow(/out of date — reload/);
   });
 });
