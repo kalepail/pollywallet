@@ -368,3 +368,43 @@ describe("compactCompileErrors", () => {
     expect(out).toContain("THE ROOT CAUSE");
   });
 });
+
+// Load-bearing prompt facts, pinned per the skill's own rule. Each of these has either
+// regressed before or was found wrong by review; without a pin, nothing stops an edit from
+// quietly removing them.
+describe("prompt facts that must not regress", () => {
+  const prompt = buildSystemPrompt();
+
+  // Keying Shape B on the function name alone misreads any TARGET contract that exposes its
+  // own execute() — routers, multicall, batch — and the policy then decodes that call's first
+  // three args as (target, fn_name, inner_args) and validates the wrong values entirely.
+  it("identifies the execute wrapper by contract, not by function name", () => {
+    expect(prompt).toMatch(/context\.contract == smart_account/);
+    expect(prompt).toMatch(/fn_name == "execute"/);
+    expect(prompt).not.toMatch(/Dispatch on fn_name:\s*\n?"execute" takes Shape B/);
+  });
+
+  // A policy is configured through install/uninstall. Telling the model to add a mutator for
+  // every getter invites an unauthenticated reconfiguration entry point into a contract that
+  // gates funds.
+  it("does not ask for a setter beside every getter", () => {
+    expect(prompt).not.toMatch(/set_\* function alongside every get_\*/);
+  });
+
+  // Three different import instructions pulled in three directions; a model picks arbitrarily.
+  it("gives exactly one import rule", () => {
+    expect(prompt).not.toMatch(/Only include imports you actually use/);
+    expect(prompt).toMatch(/keep only what you use/);
+  });
+
+  // Units guidance must stay general — it applies to every argument, not just token amounts.
+  it("states the units rule for all arguments, not only tokens", () => {
+    expect(prompt).toMatch(/SAME units as the argument it\s+constrains/i);
+    expect(prompt).toMatch(/EVERY argument type, not just token amounts/);
+  });
+
+  it("keeps ledger bounds on the sequence clock", () => {
+    expect(prompt).toMatch(/e\.ledger\(\)\.sequence\(\)/);
+    expect(prompt).toMatch(/NEVER \\?`?e\.ledger\(\)\.timestamp\(\)/);
+  });
+});

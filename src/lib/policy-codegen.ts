@@ -499,12 +499,11 @@ COMMON MISTAKES TO AVOID:
 - symbol_short!() ONLY accepts string literals up to 9 ASCII characters. "transfer" (8 chars) is OK. "approve_all" (11 chars) is NOT. For function names longer than 9 chars, use Symbol::new(env, "long_function_name") instead and compare with == Symbol::new(env, "...").
 - Do NOT hardcode contract addresses as byte arrays. Stellar StrKey addresses are base32, NOT hex — never write BytesN::from_array with address characters. If you need to reference a specific contract address, use Address::from_string(&String::from_str(e, "C...")) or better yet rely on ContextRuleType::CallContract(addr) from the context_rule which already provides the scoped address.
 - Do NOT create helper functions like get_target_contract() that try to decode Stellar addresses. The context_rule.context_type already contains the contract Address.
-- Use Vec::pop_front() for history cleanup (like the rolling sum reference), not filtering into a new Vec.
-- Always include a set_* function alongside every get_* function for policy reconfiguration.
-- ALWAYS include these imports at the top (after #![no_std]):
+- Imports: start from this line and keep only what you use — unused imports are warnings, not
+  errors, so it is always safer to over-import than to miss one:
   \`use soroban_sdk::{contract, contractimpl, contracttype, contracterror, contractevent, panic_with_error, Address, Bytes, BytesN, Env, FromVal, IntoVal, Map, String, Symbol, TryFromVal, TryIntoVal, Val, Vec};\`
   \`use soroban_sdk::auth::{Context, ContractContext};\`
-  Only include imports you actually use. Remove any unused imports.
+  Precede the block with \`#[allow(unused_imports)]\` so trimming is never required.
 - The install function signature MUST be: \`pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)\`.
 - The smart account passes \`install_params\` through UNCHANGED — it does not decode or transform
   it. PollyWallet sends a Soroban Map whose keys are Symbols naming the config fields.
@@ -563,7 +562,6 @@ CRITICAL RUST OWNERSHIP RULES (these cause most compilation failures):
 - When pattern matching on Context::Contract(ContractContext { contract, fn_name, args }), use \`ref args\` to borrow instead of move: Context::Contract(ContractContext { contract, fn_name, ref args }). This lets you still use \`context\` later.
 - Address, Symbol, String, Vec, Bytes do NOT implement Copy. When using any of these more than once, call .clone(): \`address.clone()\`, \`fn_name.clone()\`. NEVER dereference with \`*\` — use .clone() instead. For example, \`target_fn = fn_name.clone()\` not \`target_fn = *fn_name\`.
 - When building structs with Address fields from params, clone each field: \`allowed_contract: params.allowed_contract.clone()\`.
-- Prefer \`#[allow(unused_imports)]\` before your import block to suppress warnings about unused imports.
 
 UNDERSTANDING AUTHORIZATION CONTEXT (CRITICAL):
 enforce() receives the host's ORIGINAL authorization context, unchanged — the smart account's
@@ -595,8 +593,13 @@ Unwrap before applying rules:
 Then validate target + inner_fn and apply the schema's positional rules to inner_args.
 
 WHICH SHAPE YOU GET is decided by the context rule this policy is attached to, and the
-generated contract cannot know that at compile time — so HANDLE BOTH. Dispatch on fn_name:
-"execute" takes Shape B, every other name takes Shape A. Both paths must DEFAULT-REJECT.
+generated contract cannot know that at compile time — so HANDLE BOTH. Identify the shape by
+the CONTRACT being called, not by the function name: it is Shape B only when
+\`context.contract == smart_account\` AND \`fn_name == "execute"\`; anything else is Shape A.
+Keying on the name alone misreads a TARGET contract that happens to expose its own
+\`execute(...)\` — routers, multicall and batch contracts all do — and the policy would then
+decode that call's first three arguments as (target, fn_name, inner_args) and validate
+entirely the wrong values. Both paths must DEFAULT-REJECT.
 
 The two shapes are mutually exclusive per rule, because rule matching keys on
 \`context.contract\`:
