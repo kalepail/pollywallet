@@ -154,6 +154,34 @@ submodule itself pins 25.3.0 — that is fine, because generated contracts are s
 never link `stellar-accounts`, but it means you cannot infer the right version from the
 submodule.
 
+## Sandbox build cache
+
+`sandbox-worker/Dockerfile` compiles the dependency graph into the shared
+`CARGO_TARGET_DIR` at image-build time. Two graphs are needed and they share **no** compiled
+artifacts: `cargo test` builds the host target with `testutils`, `stellar contract build`
+builds `wasm32v1-none` release. Warming one does not warm the other.
+
+Measured locally (fast laptop; a 1-vCPU `standard-2` container will be several times slower):
+
+| | time | crates compiled |
+|---|---|---|
+| request build, prebuild hit | **2 s** | 1 — just the policy |
+| same build, no prebuilt artifacts | 22 s | 150 |
+| image-build prebuild (one-off) | 37 s | 1.1 GB of artifacts |
+
+The earlier "60–120 s" figure in the code comments was for *downloading* sources, which the
+old image already did via `cargo fetch`. The real gap was the ~150-crate compile.
+
+Dependency artifacts are keyed by (package, features, profile, target, rustc), not by the
+consuming crate's path, so per-request `/workspace/policy-<uuid>` dirs still hit the cache —
+verified by building in a different directory.
+
+**If it stops hitting**, the symptom is ~150 `Compiling` lines in the streamed cargo output
+instead of one. Look at `seedLockfile()`: requests build `--locked --offline` against the
+`Cargo.lock` the image compiled from, and if that lockfile is missing or the versions in
+`CARGO_TOML_TEMPLATE` drifted from the Dockerfile's copy, cargo re-resolves and every
+artifact is invalidated while the image still carries them.
+
 ## Kimi K2.7 Code: what the model will and will not do
 
 Measured against the live endpoint, 2026-08-07.
