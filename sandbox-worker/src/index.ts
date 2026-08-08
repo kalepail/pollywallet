@@ -37,21 +37,23 @@ const SANDBOX_ID = "policy-compiler";
 const DEPLOY_SANDBOX_ID = "policy-deployer";
 
 /**
- * Keep the compiler container warm.
+ * Let the compiler container sleep, just later than the default.
  *
- * Generation dominates end-to-end latency (~97% measured), but a COLD container adds a
- * one-off ~120s of dependency work plus image start on top of that, and at the SDK default of
- * `sleepAfter: "10m"` a low-traffic app pays it constantly. The image now bakes both compiled
- * dependency graphs, and `keepAlive` is what stops that warm state being thrown away.
+ * `sleepAfter: "1h"` (SDK default is "10m") keeps it warm across a working session without
+ * paying to hold a standard-2 container 24/7. Cold-start cost is mostly handled in the image
+ * now — the Dockerfile bakes both compiled dependency graphs — so this only has to cover the
+ * container start itself, not a ~120s dependency rebuild.
  *
- * `sleepAfter` is inert while `keepAlive` is true (the SDK ignores it) — it is set so the
- * intended fallback is explicit if keepAlive is ever turned off.
+ * `keepAlive: true` is the other end of this dial: it prevents sleep entirely (and makes
+ * `sleepAfter` inert — the SDK ignores it). That buys the last few seconds of cold start in
+ * exchange for continuous spend. Deliberately NOT set; revisit only if cold starts turn out to
+ * be a real problem in practice, and measure a production request before and after rather than
+ * assuming.
  *
- * COST: keepAlive means this standard-2 container does not sleep. That is a continuous spend,
- * traded deliberately for cold-start latency. The deployer sandbox does NOT get this: it runs
- * rarely and holds a signing key, so it should sleep.
+ * The deployer sandbox keeps the SDK default: it runs rarely and holds a signing key, so the
+ * sooner it sleeps the better.
  */
-const COMPILER_SANDBOX_OPTS = { keepAlive: true, sleepAfter: "1h" } as const;
+const COMPILER_SANDBOX_OPTS = { sleepAfter: "1h" } as const;
 
 /**
  * Where the image staged its prebuilt dependency graphs and the Cargo.lock they were compiled
