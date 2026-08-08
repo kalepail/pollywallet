@@ -28,6 +28,7 @@ import {
   schemaFromPatterns,
   mergeSpecIntoSchema,
   emptySchema,
+  installParamsSpec,
   type PolicySchema,
   type ContractPermission,
   type GlobalRule,
@@ -91,6 +92,11 @@ function PolicyBuilder() {
 
   // Step 4: Test Results
   const [testResults, setTestResults] = useState<TestResult[]>([]);
+  /**
+   * The deploy gate. An empty suite is NOT a pass: `[].every(...)` is `true`, so requiring a
+   * non-zero count is what stops a run that parsed no tests from looking successful.
+   */
+  const testsPassed = testResults.length > 0 && testResults.every((r) => r.passed);
   const [buildTimeline, setBuildTimeline] = useState<BuildAttempt[]>([]);
   const [testLog, setTestLog] = useState<string[]>([]);
 
@@ -379,6 +385,10 @@ function PolicyBuilder() {
     setTestResults([]);
     setBuildTimeline([]);
     setTestLog([]);
+    // Drop any WASM from a previous run BEFORE re-testing. Otherwise a failed recompile
+    // leaves the earlier binary deployable while the schema/source metadata saved alongside
+    // it describes the new, untested code.
+    setWasmBase64(null);
 
     let codeToTest = generatedCode;
     const timeline: BuildAttempt[] = [];
@@ -410,16 +420,32 @@ function PolicyBuilder() {
               output: tc.output,
             }))
           );
-          if (!testResult.success) {
+          // The test suite is the safety gate: it proves default-deny, that the policy
+          // requires the smart account's authorization, and that each declared constraint is
+          // actually enforced. Do not produce a deployable binary unless it passed. A run
+          // that parsed zero tests is a failure, not a pass.
+          if (!testResult.success || testResult.testCases.length === 0) {
             const failed = testResult.testCases.filter((tc) => !tc.passed).length;
-            setError(`${failed} test(s) failed`);
-          } else {
-            setError(null);
+            setError(
+              testResult.testCases.length === 0
+                ? "No tests ran — refusing to build a deployable binary."
+                : `${failed} test(s) failed — refusing to build a deployable binary.`
+            );
+            break;
           }
-          // Now compile separately to get the optimized WASM binary
+          setError(null);
+          // Tests passed: now compile separately to get the optimized WASM binary.
           const compileResult = await requestCompile(codeToTest);
           if (compileResult.success && compileResult.wasmBase64) {
             setWasmBase64(compileResult.wasmBase64);
+          } else {
+            // Tests green but the release build failed. Without this the UI showed no error,
+            // no WASM and no deploy button — a silent dead end that looked like success.
+            setError(
+              compileResult.errors?.length
+                ? `Tests passed but the release build failed:\n${compileResult.errors.slice(0, 5).join("\n")}`
+                : "Tests passed but the release build produced no WASM. Try re-running the tests."
+            );
           }
           break;
         }
@@ -490,6 +516,12 @@ function PolicyBuilder() {
         setError("No compiled WASM available. Please run tests first.");
         return;
       }
+      // Belt and braces: the button is already hidden unless the suite passed, but the
+      // handler must not rely on the UI for a safety check.
+      if (!testsPassed) {
+        setError("Deployment requires a passing test suite.");
+        return;
+      }
       const result = await requestDeploy(wasmBase64);
       if (!result.success || !result.contractAddress) {
         setError(result.error || "Deployment failed");
@@ -514,7 +546,7 @@ function PolicyBuilder() {
     }
     // schema and generatedCode are read above — without them here the KV record
     // is written from whatever they were when wasmBase64 last changed.
-  }, [wasmBase64, schema, generatedCode]);
+  }, [wasmBase64, testsPassed, schema, generatedCode]);
 
   // --- Step 5 Handlers ---
 
@@ -547,35 +579,19 @@ function PolicyBuilder() {
       const targetContract = schema.contracts[0]?.address;
       if (!targetContract) throw new Error("No target contract in schema");
 
-      // Build install params as Map<Val, Val> matching the schema constraints
-      const entries: InstanceType<typeof xdr.ScMapEntry>[] = [];
-      for (const contract of schema.contracts) {
-        for (const func of contract.functions) {
-          for (const arg of func.args) {
-            if (!arg.constraint || arg.constraint.kind === "unconstrained") continue;
-            if (arg.constraint.kind === "range" && arg.constraint.max) {
-              entries.push(new xdr.ScMapEntry({
-                key: xdr.ScVal.scvSymbol(`max_${arg.name}`),
-                val: toI128(BigInt(arg.constraint.max)),
-              }));
-            }
-            if (arg.constraint.kind === "range" && arg.constraint.min) {
-              entries.push(new xdr.ScMapEntry({
-                key: xdr.ScVal.scvSymbol(`min_${arg.name}`),
-                val: toI128(BigInt(arg.constraint.min)),
-              }));
-            }
-          }
-        }
-      }
-      for (const rule of schema.globalRules) {
-        if (rule.type === "threshold") {
-          entries.push(new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("threshold"),
-            val: xdr.ScVal.scvU32(rule.params.threshold),
-          }));
-        }
-      }
+      // Build install params as Map<Val, Val> from the SHARED spec — the same function that
+      // tells the model which keys exist and that the generated tests install with. This
+      // previously had its own copy of the convention: it used truthy `if (max)` guards
+      // (dropping a bound of 0) and never emitted the `allowed_*` or time-lock keys the
+      // prompt declares. Since the prompt now instructs policies to panic on a missing
+      // declared key, that drift made allowlist/time_lock policies pass their tests and then
+      // fail their real add_context_rule install.
+      const entries = installParamsSpec(schema).map(p => new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol(p.key),
+        val: p.type === "i128" ? toI128(BigInt(p.value))
+          : p.type === "u32" ? xdr.ScVal.scvU32(Number(p.value))
+          : xdr.ScVal.scvBool(p.value === "true"),
+      }));
 
       // Build installParams ScVal
       let installParamsXdr = "";
@@ -929,20 +945,21 @@ function PolicyBuilder() {
                 <Sparkle size={16} weight="fill" />
                 Re-test
               </button>
-              {wasmBase64 && !loading && (
+              {/*
+                No "Deploy Anyway" escape hatch. The generated suite is what proves the policy
+                fails closed — that it rejects unlisted contracts and functions, and that it
+                requires the smart account's authorization. Deploying past a failing suite
+                ships a policy that may authorize everything. wasmBase64 is only ever set
+                after the suite passes, so this button's presence is itself the gate.
+              */}
+              {wasmBase64 && testsPassed && !loading && (
                 <button
                   onClick={handleDeploy}
                   disabled={loading}
-                  className={`flex-1 flex items-center justify-center gap-3 px-6 py-4 ${
-                    testResults.length > 0 && testResults.every((r) => r.passed)
-                      ? "bg-violet-500 hover:bg-violet-600 shadow-lg shadow-violet-500/25"
-                      : "bg-amber-600 hover:bg-amber-700 shadow-lg shadow-amber-600/25"
-                  } disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors`}
+                  className="flex-1 flex items-center justify-center gap-3 px-6 py-4 bg-violet-500 hover:bg-violet-600 shadow-lg shadow-violet-500/25 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
                 >
                   {loading ? <Loader size={20} /> : null}
-                  {testResults.length > 0 && testResults.every((r) => r.passed)
-                    ? "Deploy to Testnet"
-                    : "Deploy Anyway (tests incomplete)"}
+                  Deploy to Testnet
                   <ArrowRight size={16} />
                 </button>
               )}

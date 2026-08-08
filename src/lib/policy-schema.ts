@@ -170,8 +170,15 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
 
       if (!c.address || typeof c.address !== "string") {
         errors.push(`${cPrefix}: address is required`);
-      } else if (!c.address.startsWith("C") && !c.address.startsWith("G")) {
-        errors.push(`${cPrefix}: address must start with "C" or "G"`);
+      } else if (!isValidContractAddress(c.address)) {
+        // A first-character check is not enough. An address with a valid prefix but a bad
+        // checksum passes straight through to codegen and the generated tests, then fails at
+        // RUNTIME inside the contract with
+        //   HostError: Error(Value, InvalidInput) "couldn't process the string as strkey"
+        // which surfaces as an unexplained test failure rather than a schema error.
+        errors.push(
+          `${cPrefix}: address is not a valid Stellar contract address (C... StrKey): "${c.address}"`
+        );
       }
 
       if (!Array.isArray(c.functions) || c.functions.length === 0) {
@@ -205,6 +212,24 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
                 }
                 const constraintErrors = validateConstraint(arg.constraint, aPrefix);
                 errors.push(...constraintErrors);
+
+                // Address VALUES need the same checksum check as contract addresses. The
+                // generated policy bakes these literals into Address::from_string(), so a
+                // malformed one panics at runtime with an opaque
+                // Error(Value, InvalidInput) "unexpected strkey length" during install —
+                // long after the schema was accepted.
+                if (arg.type.toLowerCase() === "address") {
+                  const values = arg.constraint.kind === "exact" ? [arg.constraint.value]
+                    : arg.constraint.kind === "allowlist" || arg.constraint.kind === "blocklist"
+                      ? arg.constraint.values : [];
+                  for (const v of values) {
+                    if (typeof v === "string" && v && !isValidAddress(v)) {
+                      errors.push(
+                        `${aPrefix}: "${v}" is not a valid Stellar address (G... or C... StrKey)`
+                      );
+                    }
+                  }
+                }
               }
             }
           }
@@ -449,4 +474,159 @@ export function schemaToJSON(schema: PolicySchema): string {
 
 export function schemaFromJSON(json: string): PolicySchema {
   return JSON.parse(json) as PolicySchema;
+}
+
+// --- Install Params Convention (single source of truth) ---
+//
+// The Symbol keys sent to a policy's `install()` are consumed by THREE independent places:
+//   1. buildInstallParamsKeyList()   (policy-codegen.ts) — tells the model which keys exist
+//   2. generateInstallParamsHelper() (policy-sandbox.ts) — what the generated tests install with
+//   3. the deploy path               (routes/policies.tsx) — what is actually sent on-chain
+//
+// They MUST agree. They previously drifted: the prompt declared `allowed_*` and time-lock keys
+// that the on-chain builder never sent, and the on-chain builder used truthy `if (max)` guards
+// that silently dropped a bound of 0. Once the prompt began instructing policies to PANIC on a
+// missing declared key, that drift turned from a silent-permissive bug into a hard install
+// failure: allowlist/time_lock schemas would pass their tests, deploy, then fail
+// add_context_rule on-chain. Derive all three from this one function.
+
+export interface InstallParam {
+  key: string;
+  /** Soroban type of the value. */
+  type: "i128" | "u32" | "bool";
+  /** Value as a string; callers convert per `type`. */
+  value: string;
+  /** Human-readable purpose, used in the prompt's key list. */
+  description: string;
+}
+
+export function installParamsSpec(schema: PolicySchema): InstallParam[] {
+  const params: InstallParam[] = [];
+
+  for (const contract of schema.contracts) {
+    for (const func of contract.functions) {
+      for (const arg of func.args) {
+        const c = arg.constraint;
+        if (!c || c.kind === "unconstrained") continue;
+
+        if (c.kind === "range") {
+          // `!= null`, never truthiness: a bound of "0" is a real constraint.
+          if (c.max != null) {
+            params.push({
+              key: `max_${arg.name}`, type: "i128", value: String(c.max),
+              description: `maximum allowed value for ${arg.name}`,
+            });
+          }
+          if (c.min != null) {
+            params.push({
+              key: `min_${arg.name}`, type: "i128", value: String(c.min),
+              description: `minimum allowed value for ${arg.name}`,
+            });
+          }
+        }
+
+        if (c.kind === "allowlist" && c.values.length > 0) {
+          // A feature flag only. The permitted VALUES are baked into the generated contract
+          // from the schema; install params carry no list. Keep the flag so the contract can
+          // verify it was configured deliberately.
+          params.push({
+            key: `allowed_${arg.name}`, type: "bool", value: "true",
+            description: `flag that the allowlist for ${arg.name} is enabled`,
+          });
+        }
+      }
+    }
+  }
+
+  for (const rule of schema.globalRules) {
+    if (rule.type === "threshold") {
+      params.push({
+        key: "threshold", type: "u32", value: String(rule.params.threshold),
+        description: `minimum number of signers required (value: ${rule.params.threshold})`,
+      });
+    }
+    if (rule.type === "time_lock") {
+      if (rule.params.validAfterLedger != null) {
+        params.push({
+          key: "valid_after_ledger", type: "u32", value: String(rule.params.validAfterLedger),
+          description: "earliest allowed ledger",
+        });
+      }
+      if (rule.params.validUntilLedger != null) {
+        params.push({
+          key: "valid_until_ledger", type: "u32", value: String(rule.params.validUntilLedger),
+          description: "latest allowed ledger",
+        });
+      }
+    }
+  }
+
+  // Soroban requires ScMap keys in ascending order and REJECTS an unsorted map during
+  // ScVal -> host conversion. Schema order is not sorted order: two constrained args yield
+  // [max_amount, min_amount, max_to, min_to], which must become
+  // [max_amount, max_to, min_amount, min_to]. The in-contract test harness never caught this
+  // because it builds the map with host `Map::set`, which sorts for you — only the real
+  // deploy path hand-builds the ScMap. smart-account-kit sorts its own param maps the same
+  // way (canonical lexical field order).
+  return params.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+// --- Address validation ---
+
+/**
+ * True when `value` is a checksum-valid Stellar contract address.
+ *
+ * Contracts must be `C...` StrKeys. A prefix-only check lets a malformed address reach the
+ * generated Rust, where `Address::from_string` panics at runtime with an opaque
+ * `Error(Value, InvalidInput)` — a schema problem disguised as a policy bug.
+ *
+ * Implemented locally rather than via `StrKey` from @stellar/stellar-sdk so this module stays
+ * dependency-free: it is imported by the prompt builder, the test generator, and the browser
+ * route alike.
+ */
+export function isValidContractAddress(value: string): boolean {
+  return isValidStrKey(value, "C");
+}
+
+/** True for either an account (`G...`) or contract (`C...`) address. */
+export function isValidAddress(value: string): boolean {
+  return isValidStrKey(value, "G") || isValidStrKey(value, "C");
+}
+
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function isValidStrKey(value: string, prefix: string): boolean {
+  if (typeof value !== "string" || !value.startsWith(prefix) || value.length !== 56) return false;
+
+  // base32 decode
+  const bytes: number[] = [];
+  let bits = 0;
+  let acc = 0;
+  for (const ch of value) {
+    const idx = B32.indexOf(ch);
+    if (idx === -1) return false;
+    acc = (acc << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((acc >> bits) & 0xff);
+    }
+  }
+  if (bytes.length !== 35) return false; // 1 version + 32 payload + 2 checksum
+
+  const payload = bytes.slice(0, 33);
+  const checksum = bytes[33] | (bytes[34] << 8);
+  return crc16xmodem(payload) === checksum;
+}
+
+/** CRC16-XModem, the checksum StrKey uses. */
+function crc16xmodem(bytes: number[]): number {
+  let crc = 0x0000;
+  for (const byte of bytes) {
+    crc ^= byte << 8;
+    for (let i = 0; i < 8; i++) {
+      crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+    }
+  }
+  return crc & 0xffff;
 }

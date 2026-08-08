@@ -45,7 +45,7 @@ stellar-contracts/   # Git submodule: OpenZeppelin Stellar Contracts (Rust/Sorob
 ## Key Dependencies
 
 - `@cloudflare/sandbox` — Sandbox SDK for isolated code execution (policy testing)
-- `@cf/moonshotai/kimi-k2.5` — Workers AI model for policy code generation (256k context)
+- `@cf/moonshotai/kimi-k2.7-code` — Workers AI model for policy code generation (262k context, shared with output). Reasoning cannot be disabled and consumes `max_tokens`; see `.claude/skills/soroban-policy-authoring/SKILL.md`
 - `@stellar/stellar-sdk` — Transaction building, parsing, RPC calls
 - `@simplewebauthn/browser` — Passkey authentication
 

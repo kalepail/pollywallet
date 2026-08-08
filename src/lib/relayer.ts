@@ -21,10 +21,27 @@ function getClient() {
 }
 
 // --- Server-side deploy signing ---
-// The deployer keypair is reconstructed server-side so the private key
-// never enters the client bundle.
-// TODO(mainnet): Load from an environment secret instead of a deterministic seed.
+// The deployer keypair is reconstructed server-side so the private key never enters the
+// client bundle. Keeping it off the client is necessary but NOT sufficient: a keypair is
+// only secret if its seed is.
+//
+// Set the secret with:  npx wrangler secret put DEPLOYER_SEED
+// (any string; it is hashed to 32 bytes. Use `openssl rand -hex 32`.)
 function getDeployerKeypair(): Keypair {
+  const seed =
+    (globalThis as any).DEPLOYER_SEED
+    || (typeof process !== "undefined" ? process.env?.DEPLOYER_SEED : undefined);
+
+  if (seed) return Keypair.fromRawEd25519Seed(hash(Buffer.from(seed)) as Buffer);
+
+  // Fallback: the historic hardcoded seed. This key is PUBLIC — sha256("pollywallet") is
+  // computable by anyone, so anyone can derive its secret key, drain it, or grief it. It is
+  // kept only so local dev works without setup, and it is safe only because this is testnet.
+  // Do NOT carry this fallback to mainnet: delete it and make the secret mandatory.
+  console.warn(
+    "[relayer] DEPLOYER_SEED is not set — falling back to the publicly derivable "
+    + 'sha256("pollywallet") seed. Anyone can compute this key. Testnet only.'
+  );
   return Keypair.fromRawEd25519Seed(hash(Buffer.from("pollywallet")) as Buffer);
 }
 

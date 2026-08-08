@@ -17,7 +17,12 @@
 			// contract in 256 MiB, so policy compilation could never succeed on it.
 			// standard-2 (1 vCPU / 6 GiB / 12 GB) is what AGENTS.md already recommends.
 			"instance_type": "standard-2",
-			"max_instances": 1
+			// At least 2: compilation and deployment now run under different sandbox ids
+			// ("policy-compiler" / "policy-deployer") so that untrusted generated code never
+			// shares a filesystem with the signing key. Distinct ids are distinct Durable
+			// Objects and therefore need distinct container instances. The headroom above 2
+			// also relieves the head-of-line blocking from every user sharing one container.
+			"max_instances": 4
 		}
 	],
 	"durable_objects": {

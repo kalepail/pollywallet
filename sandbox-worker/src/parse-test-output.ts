@@ -53,7 +53,11 @@ export function parseTestOutput(output: string, execSucceeded: boolean): ParsedT
   // Check if compilation succeeded (tests ran at all)
   const compiled = output.includes("running") || output.includes("test result");
   const hasRealError = output.includes("error[E") || output.includes("error: could not compile");
-  const success = execSucceeded && testCases.every((tc) => tc.passed);
+  // `[].every(...)` is `true`, so a run that parsed NO tests used to report success whenever
+  // cargo exited 0 — which a hostile crate can arrange with a crate-level `#![cfg(any())]`
+  // that disables the appended test module ("running 0 tests", exit 0). An empty suite proves
+  // nothing, so it is a failure.
+  const success = execSucceeded && testCases.length > 0 && testCases.every((tc) => tc.passed);
 
   // If not compiled and no real error, this was likely a timeout during
   // dependency download / initial compilation. Report it clearly.

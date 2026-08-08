@@ -1,0 +1,227 @@
+---
+name: soroban-policy-authoring
+description: Ground truth for writing OpenZeppelin Stellar smart-account policy contracts, and for maintaining the Kimi codegen prompt that generates them. Use when editing src/lib/policy-codegen.ts, src/lib/policy-sandbox.ts, or the generated policy Rust; when a generated policy fails to compile, install, or enforce; or when reviewing whether a policy actually fails closed. Do not use for general Soroban contract work unrelated to smart-account policies.
+---
+
+# Soroban smart-account policy authoring
+
+Every claim here was verified against the checked-in submodule
+`stellar-contracts/packages/accounts/` and the local clone of `stellar/smart-account-kit`
+on 2026-08-07. **Re-verify after bumping the submodule.** Where a claim is measured against
+the live Workers AI endpoint it says so.
+
+Read this before changing `buildSystemPrompt()`. The prompt is downstream of these facts;
+if the two disagree, the source wins.
+
+## The three things that are easy to get wrong
+
+### 1. There are TWO context shapes, and the `execute()` wrapper is real
+
+This is the easiest thing to get wrong, and a previous revision of the prompt got it exactly
+backwards — it told the model the wrapper was a fiction, which deleted the handling that
+Default-scoped rules actually need.
+
+`do_check_auth` passes the host's original `auth::Context` to each policy **unchanged**, and
+performs no rewriting. That much is true. The mistake is concluding a wrapper shape therefore
+never occurs. The shape comes from the **host**, not from the account:
+
+- **Shape A — direct call.** The target contract calls `require_auth(smart_account)`. Context
+  is `{contract: target, fn_name: "transfer", args: [...]}`. This is what a **CallContract**
+  rule sees.
+- **Shape B — execute wrapper.** `execute(target, target_fn, target_args)` in
+  `smart_account/mod.rs` calls `e.current_contract_address().require_auth()` *before*
+  `invoke_contract`. Soroban's invoker-auth model builds that requirement's context from the
+  **current invocation**, so the policy receives
+  `{contract: smart_account, fn_name: "execute", args: [target, fn, inner_args]}`.
+  This is what a **Default** rule sees.
+
+Three independent confirmations:
+1. `smart_account/mod.rs` — `execute()` calls `require_auth()` on itself first.
+2. Soroban's invoker-auth semantics: `require_auth()` authorizes the *current* invocation.
+3. **This repo's own `src/hooks/useWallet.ts`** builds `fn_name: "execute"` with
+   `args[0..2]` on its default send path, and its comment documents both routes explicitly.
+
+The misleading evidence that caused the error:
+
+```
+grep -rn "execute" stellar-contracts/packages/accounts/src/policies/   # returns nothing
+```
+
+That is true but proves nothing about the platform — all three OZ reference policies are
+CallContract-scoped by design, so they only ever see Shape A.
+
+**A generated policy cannot know at compile time which rule it will be attached to, so it must
+handle both and default-reject on both.**
+
+Rule matching keys on `context.contract`, so the shapes are mutually exclusive per rule: a
+`Default` rule (or one scoped to the account's own address) sees Shape B; a
+`CallContract(token)` rule is never selected for an execute-routed call. And under Shape B the
+inner call is a direct contract-to-contract invocation, which Soroban always authorizes — **it
+never appears as a separate authorization context.** A policy receiving an execute context
+must therefore enforce everything against the unwrapped inner call immediately; no second
+`enforce()` arrives for it.
+
+### Testing policies through the account
+
+`mock_all_auths()` / `mock_auths()` put the host in *recording* mode, which marks auths
+authenticated without ever invoking the account contract — so `__check_auth`, and therefore
+any attached policy, **never runs** through those. Paths that do run it: `env.set_auths(&[…])`
+with a real `SorobanAuthorizationEntry`, `env.try_invoke_contract_check_auth(..)`, or calling
+`do_check_auth` inside `e.as_contract(..)` with hand-built contexts (OZ's own idiom, see
+`smart_account/test/context_rules.rs`). On host 27.0.1 `mock_auths` additionally failed a
+structurally-correct entry with a misleading "unknown contract function" error; prefer
+`set_auths`.
+
+This does **not** affect PollyWallet's generated suite, which unit-tests the policy contract
+directly via its own client (the same approach OZ's policy tests take). It matters only if you
+try to test the full account → policy path.
+
+### 2. Install params must fail closed
+
+The wire contract: the smart account passes `install_params` through untouched
+(`storage.rs`, `PolicyClient::new(e, &policy).install(&param, ...)`). PollyWallet sends a
+Symbol-keyed `ScVal::Map` — which in Soroban is *also* the canonical serialization of a
+`#[contracttype]` struct, so a typed struct with matching field names produces identical
+bytes. The kit's own encoder pins this shape in a test.
+
+So the encoding is correct. The **defaulting** is the bug. Any instruction of the form
+"use `.unwrap_or()` so install succeeds even if a key is missing", or "when params is void
+use maximum/permissive defaults", converts a malformed install into a policy that
+authorizes everything. Every constraint the schema declares is required configuration:
+absent or unparseable ⇒ panic. Decode with `TryFromVal`, never `FromVal` + `unwrap()`.
+
+### 3. The ABI is `Val`, but the trait is typed
+
+Both statements are true and they are not in conflict:
+
+- The Rust trait declares `type AccountParams: FromVal<Env, Val>` and
+  `fn install(e, install_params: Self::AccountParams, ...)`.
+- `#[contractclient]` cannot carry an associated type, so OpenZeppelin declares a separate
+  internal `PolicyClientInterface` whose `install` takes `Val`. That is the cross-contract
+  ABI.
+
+A **standalone** generated contract must therefore export
+`install(e: &Env, install_params: Val, ...)` and decode it itself. Do not tell the model
+its signatures "must match the Policy trait exactly" *and* that install takes `Val` — that
+pair of instructions is contradictory and makes the model oscillate.
+
+## Required ABI
+
+Exactly these three, and nothing more is required:
+
+```rust
+pub fn enforce(e: &Env, context: Context, authenticated_signers: Vec<Signer>,
+               context_rule: ContextRule, smart_account: Address)
+pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)
+pub fn uninstall(e: &Env, context_rule: ContextRule, smart_account: Address)
+```
+
+Smart-account-kit never introspects a policy's spec; `policy-clients.ts` hard-codes clients
+for exactly the three OpenZeppelin example policies. Getters/setters are optional — add
+them only when there is genuinely reconfigurable state.
+
+## Enforcement semantics
+
+- `enforce` runs once per **(auth context × attached policy)** pair — not once per
+  transaction.
+- Policies on a rule are **AND**. All must pass.
+- A panic in `enforce` aborts the whole transaction (it is a plain call). Only `uninstall`
+  is best-effort, via `try_uninstall`.
+- `authenticated_signers` is the account's already-verified subset of the rule's signers.
+  It carries **identities only**, never signature bytes. It may be empty for a policy-only
+  rule and may be a proper subset. Never attempt signature verification in `enforce`.
+- Context may also be a contract-creation variant. Reject unless the schema allows it.
+
+## Conventions to mirror
+
+| Concern | Convention |
+|---|---|
+| Storage | one persistent key `AccountContext(Address, u32)` = (smart_account, context_rule_id). Policies are multi-tenant; never key by rule id alone or globally. No temporary/instance storage in any reference policy. |
+| TTL | `DAY_IN_LEDGERS = 17_280`; `EXTEND_AMOUNT = 30 * DAY = 518_400`; `TTL_THRESHOLD = EXTEND_AMOUNT - DAY = 501_120`. Extend on read. |
+| Events | the **only** `#[topic]` is `smart_account: Address`; everything else is data. |
+| Error codes | **start at 4000.** `3000-3227` is reserved by OpenZeppelin: smart account 3000-3016, WebAuthn 3110-3119, simple threshold 3200-3203, weighted 3210-3214, spending limit 3220-3227. The kit maps these to fixed messages, so reuse renders the wrong error. |
+| Derives | `Signer`: `Clone, Debug, PartialEq, Eq, PartialOrd, Ord`. `ContextRuleType`: `Clone, Debug, PartialEq, Eq`. `ContextRule`: `Clone, Debug, PartialEq`. Matters when `Signer` is used as a `Map` key. |
+
+Account invariants worth encoding: ≤15 signers, ≤5 policies, not both empty, name ≤20
+bytes, external key data ≤256 bytes, `valid_until` inclusive (expires only when
+`n < current_ledger`), ids monotonic and never recycled.
+
+## SDK version
+
+The prompt must name the SDK the sandbox actually builds. `CARGO_TOML_TEMPLATE` in
+`src/lib/policy-sandbox.ts` is the source of truth (currently **27.0.5**). Note the
+submodule itself pins 25.3.0 — that is fine, because generated contracts are standalone and
+never link `stellar-accounts`, but it means you cannot infer the right version from the
+submodule.
+
+## Kimi K2.7 Code: what the model will and will not do
+
+Measured against the live endpoint, 2026-08-07.
+
+- **Reasoning cannot be disabled or throttled.** `enable_thinking: false` (the real schema
+  key) is an inert no-op. `thinking: false` is *not* a schema key and is harmful — it drops
+  the `reasoning_content` channel so reasoning prose lands in `delta.content` and poisons
+  the code buffer. `reasoning_effort` is server-validated but its measured effect is
+  unreliable, and `"none"` fails the same way as `thinking: false`. **Pass none of them.**
+- **Reasoning and code share `max_tokens`** (`reasoning_content + content <= max_tokens`),
+  and reasoning is 70-87% of every completion. At `max_tokens: 256` the model emits 256
+  tokens of reasoning and zero code.
+- **Reasoning length is what varies, not output size.** The same trivial schema produced
+  6,578 and 14,947 completion tokens on consecutive runs, while code stayed at ~8.1-8.3 KB.
+- **Prefix caching is automatic**, no header required — measured 99-100% hit rate in
+  64-token blocks. The `x-session-affinity` header should be a **constant**, not per-user;
+  a per-user key fragments the shared system-prompt cache.
+- **Streaming is load-bearing.** Non-streaming requests time out (CF error 3046) at large
+  budgets.
+- Rate limit is **20 rpm** per account/model (50 with AI Gateway credits). No batch API on
+  `kimi-k2.7-code`.
+
+Practical consequence: **do not trim the system prompt for cost.** It is ~6,275 tokens,
+2.4% of the 262,144 context, and it caches at ~100%. Remove content because it is *wrong*,
+never because it is long — the reference implementations are the highest-value tokens in
+it. Generation is 97-99.5% of end-to-end wall clock, so sandbox speedups optimise the
+remaining 1-3%.
+
+## What the generated test suite must prove
+
+`generateTestCases()` in `src/lib/policy-sandbox.ts` is the only gate between an AI-written
+contract and a testnet deploy. Two invariants are generated for **every** schema, regardless
+of which constraint kinds it uses, because without them a policy whose `enforce()` body is
+empty passes everything else:
+
+- `test_enforce_rejects_unknown_function` / `test_enforce_rejects_unknown_contract` —
+  default-deny.
+- `test_enforce_requires_smart_account_auth` — every other test runs under
+  `mock_all_auths()`, which hides a missing `require_auth()`. This one uses
+  `env.set_auths(&[])`.
+
+Rules for anything you add:
+
+- Use `client.try_<fn>(...).is_err()`, never bare `#[should_panic]`. A bare should_panic is
+  satisfied by *any* panic — including one from install, address decoding, or argument
+  conversion — so a policy can pass a rejection test without ever rejecting anything.
+- Open every negative test with a **positive control**: the compliant call must succeed
+  first, so the failure is attributable to the mutation and not to broken setup.
+- Build a context per `(contract, function)`. Reusing `contracts[0].functions[0]` meant a
+  test nominally about contract #2 actually sent contract #1's context.
+- Generate both sides of every boundary. An allowlist that only tests the allowed value is
+  passed by a policy that allows everything.
+- Scope test names with the `c{i}_f{j}` index — two functions sharing an argument name
+  otherwise emit duplicate Rust fns and the crate fails to compile.
+- A run that parsed **zero** tests is a failure, not a pass (`[].every()` is `true`).
+
+Verify changes with mutation testing, not just by reading the output. Take a policy known to
+compile, gut its `enforce()` to `{}` (keeping `require_auth`), and confirm the suite fails;
+then remove `require_auth` and confirm the auth test fails. Both mutants must be caught.
+
+## When a generated policy fails
+
+1. **Truncated / unclosed delimiter / zero bytes** → token budget, not model quality. Check
+   `finish_reason`. This is the unrecoverable class: `buildFixPrompt` cannot repair severed
+   source.
+2. **One or two ordinary type errors** → the recoverable class; the fix pass handles it.
+   Raising the budget converts failures from class 1 into class 2, which is the main value
+   of the budget change.
+3. **Prose mixed into the Rust** → something disabled the `reasoning_content` channel.
+   Check for `thinking: false` or `reasoning_effort: "none"`.
+4. **Installs but authorizes everything** → permissive defaults. See §2 above.

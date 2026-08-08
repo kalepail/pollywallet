@@ -1,12 +1,19 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
 import type { PolicySchema } from "./policy-schema";
-import { schemaToJSON, validateSchema } from "./policy-schema";
+import { schemaToJSON, validateSchema, installParamsSpec } from "./policy-schema";
 import { POLICY_CODEGEN_MODEL } from "./constants";
 
 // --- Reference source code embedded as constants ---
-// These are the COMPLETE real implementations from the OpenZeppelin Stellar Contracts repo.
-// With 262k context on Kimi K2.7 Code, we include full source for maximum fidelity.
+// CONDENSED excerpts derived from the OpenZeppelin Stellar Contracts submodule
+// (stellar-contracts/packages/accounts/src/). They are formatting-condensed and
+// deliberately incomplete — do NOT describe them to the model as "complete" or
+// "exact". Verified against the submodule 2026-08-07; re-check after bumping it.
+//
+// The whole system prompt measures ~6,275 tokens, 2.4% of the model's 262,144
+// context, and Workers AI prefix-caches it at a 99-100% hit rate. Size is not a
+// reason to trim it: the reference implementations are the highest-value tokens
+// here. Only remove content that is WRONG.
 
 const POLICY_TRAIT_SOURCE = `\
 use soroban_sdk::{auth::Context, contractclient, Address, Env, FromVal, Val, Vec};
@@ -56,14 +63,14 @@ const CORE_TYPES_SOURCE = `\
 //   use soroban_sdk::{FromVal, TryFromVal, IntoVal, TryIntoVal, Val};
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Signer {
     Delegated(Address),
-    External(Address, Bytes),
+    External(Address, Bytes), // (verifier contract, public key data)
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextRuleType {
     Default,
     CallContract(Address),
@@ -453,22 +460,40 @@ pub fn uninstall(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
 export function buildSystemPrompt(): string {
   return `You are a Soroban smart contract expert. You generate Rust source code for Stellar/Soroban policy contracts.
 
-Your generated contract must be a STANDALONE, COMPILABLE Rust file that depends only on soroban-sdk = "25.3". It will NOT have access to the stellar-accounts crate — you must define all types inline.
+Your generated contract must be a STANDALONE, COMPILABLE Rust file that depends only on soroban-sdk = "27.0.5". It will NOT have access to the stellar-accounts crate — you must define all types inline.
 
 RULES:
 1. Output ONLY valid Rust source code. No markdown fences, no explanations.
 1a. The VERY FIRST LINE of the file MUST be \`#![no_std]\` — this is a WASM contract, not a binary.
 2. The contract struct MUST be named \`PolicyContract\` with \`#[contract] pub struct PolicyContract;\`
 3. Implement enforce, install, uninstall as \`#[contractimpl] impl PolicyContract { pub fn enforce(...) ... }\`
-4. The function signatures must match the Policy trait exactly (see below).
-5. Define Signer, ContextRule, ContextRuleType as inline #[contracttype] enums/structs (copy from CORE TYPES below).
-6. Use #[contracterror] for error enums and #[contractevent] with .publish(e) for events (these ARE available in soroban-sdk 25.3).
+4. Export EXACTLY these three entry points — this is the ABI the smart account calls:
+     pub fn enforce(e: &Env, context: Context, authenticated_signers: Vec<Signer>, context_rule: ContextRule, smart_account: Address)
+     pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)
+     pub fn uninstall(e: &Env, context_rule: ContextRule, smart_account: Address)
+   \`install\` takes \`Val\` (NOT a typed parameter) because OpenZeppelin's cross-contract
+   \`PolicyClient\` erases the \`Policy\` trait's associated \`AccountParams\` type. A
+   library-backed Rust policy declares a typed \`AccountParams\`; a STANDALONE contract like
+   yours must accept \`Val\` and decode it itself. These three functions are the only surface
+   the smart account requires.
+5. Define Signer, ContextRule, ContextRuleType as inline #[contracttype] enums/structs (copy from CORE TYPES below, including their derives).
+6. Use #[contracterror] for error enums and #[contractevent] with .publish(e) for events.
 7. Use persistent storage keyed by (smart_account_address, context_rule_id) via a StorageKey enum.
+   A deployed policy is MULTI-TENANT: the same contract serves many smart accounts and many
+   context rules. Never key state by rule id alone and never key it globally.
 8. Always call smart_account.require_auth() at the start of enforce, install, and uninstall.
 9. Use TTL extension (extend_ttl) when reading persistent storage.
 10. Use ONLY soroban_sdk types: Address, Bytes, BytesN, Map, Symbol, String, Vec. Never use std types.
-11. Include BOTH getter AND setter functions for policy data. See the references.
-12. Follow the EXACT patterns from the reference implementations below — they are real, production code.
+11. Add public getter/setter functions ONLY when the policy has reconfigurable state worth
+    exposing (e.g. a limit or threshold a user may later change). They are optional: the smart
+    account never calls them. Do not invent them for a policy with nothing to reconfigure.
+12. Assign #[contracterror] discriminants starting at 4000. The ranges 3000-3227 are RESERVED by
+    OpenZeppelin (smart account 3000-3016, WebAuthn 3110-3119, threshold 3200-3203, weighted
+    3210-3214, spending limit 3220-3227). Reusing them makes client tooling render the wrong
+    error message.
+13. Follow the patterns in the reference implementations below. They are CONDENSED excerpts of
+    real OpenZeppelin code — faithful in logic, but abbreviated and missing some functions.
+    Mirror their structure; do not assume they are complete.
 
 COMMON MISTAKES TO AVOID:
 - symbol_short!() ONLY accepts string literals up to 9 ASCII characters. "transfer" (8 chars) is OK. "approve_all" (11 chars) is NOT. For function names longer than 9 chars, use Symbol::new(env, "long_function_name") instead and compare with == Symbol::new(env, "...").
@@ -481,55 +506,111 @@ COMMON MISTAKES TO AVOID:
   \`use soroban_sdk::auth::{Context, ContractContext};\`
   Only include imports you actually use. Remove any unused imports.
 - The install function signature MUST be: \`pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)\`.
-- install_params may be Val::VOID (no configuration) or a Map<Val, Val> with Symbol keys. ALWAYS handle both cases:
+- The smart account passes \`install_params\` through UNCHANGED — it does not decode or transform
+  it. PollyWallet sends a Soroban Map whose keys are Symbols naming the config fields.
+- Decode it as \`Map<Val, Val>\` and read keys individually. A Symbol-keyed Map is also the
+  canonical wire form of a #[contracttype] struct, so a typed struct would decode the same
+  bytes — but only when its field set matches the map's key set EXACTLY. A key-set mismatch
+  panics inside the host conversion rather than returning an Err you can catch and report, so
+  prefer the Map and per-key extraction shown below.
+- FAIL CLOSED. This is a security requirement, not a style preference:
   \`\`\`
-  // Check if install_params is void (no config provided)
-  if install_params.is_void() {
-      // Store sensible defaults and return
-  } else {
-      let params: Map<Val, Val> = FromVal::from_val(e, &install_params);
-      let max_amount: i128 = params.get(Symbol::new(e, "max_arg_name").into_val(e)).map(|v| i128::try_from_val(e, &v).unwrap()).unwrap_or(i128::MAX);
-      let threshold: u32 = params.get(Symbol::new(e, "threshold").into_val(e)).map(|v| u32::try_from_val(e, &v).unwrap()).unwrap_or(1);
-  }
+  // Decode defensively with TryFromVal — never FromVal + unwrap().
+  let params: Map<Val, Val> = Map::try_from_val(e, &install_params)
+      .unwrap_or_else(|_| panic_with_error!(e, PolicyError::InvalidInstallParams));
+  let max_amount: i128 = params
+      .get(Symbol::new(e, "max_amount").into_val(e))
+      .and_then(|v| i128::try_from_val(e, &v).ok())
+      .unwrap_or_else(|| panic_with_error!(e, PolicyError::MissingInstallParam));
   \`\`\`
-  The key names follow this convention: "max_{arg_name}" for range max, "min_{arg_name}" for range min, "threshold" for threshold, "allowed_{arg_name}" for allowlists. Use .unwrap_or() with safe defaults so install succeeds even if a key is missing. When params is void, use maximum/permissive defaults (i128::MAX for limits, 1 for thresholds).
+  * Every constraint the schema declares is REQUIRED configuration. If its key is absent or
+    unparseable, PANIC. Never substitute a permissive fallback: \`unwrap_or(i128::MAX)\` or
+    \`unwrap_or(1)\` silently converts a malformed install into an unrestricted policy that
+    authorizes everything. That is the exact opposite of this policy's purpose.
+  * Only accept \`Val::VOID\` when the schema declares NO constraints and NO global rules at all.
+    If the schema declares anything, a void \`install_params\` must panic.
+  * A safe default is only acceptable for genuinely optional configuration, and it must be the
+    RESTRICTIVE end of the range, never the permissive one.
+- Key naming convention: "max_{arg_name}" for a range max, "min_{arg_name}" for a range min,
+  "threshold" for a signer threshold, "allowed_{arg_name}" for an allowlist flag. The exact key
+  list for this policy is given in the user message — use those names verbatim.
 - Arguments in the schema are listed in order (index 0, 1, 2, ...). When extracting args for enforcement, use the argument's position in the schema's function args list as the index. For example, if the schema lists args [from, to, amount], then from=args.get(0), to=args.get(1), amount=args.get(2).
 - For execute() wrapping, inner_args indices correspond to the argument positions in the schema (the schema already accounts for the execute wrapper).
 - The soroban-sdk auto-generates a \`PolicyContractClient\` type from \`#[contract] pub struct PolicyContract\` + \`#[contractimpl]\`. Tests use this client.
 
 CRITICAL RUST OWNERSHIP RULES (these cause most compilation failures):
-- Context does NOT implement Debug or PartialEq. NEVER derive Debug on structs containing Context. If you need events with context info, store only the relevant fields (fn_name, contract address) not the full Context.
+- On soroban-sdk 27.0.5 \`Context\` derives Clone and Debug but NOT PartialEq. So \`#[derive(Debug)]\` on a struct containing Context is fine; \`#[derive(PartialEq)]\` or \`#[derive(Eq)]\` is NOT and will fail to compile. Prefer storing only the fields you need (fn_name, contract address) in events rather than a whole Context.
 - When pattern matching on Context::Contract(ContractContext { contract, fn_name, args }), use \`ref args\` to borrow instead of move: Context::Contract(ContractContext { contract, fn_name, ref args }). This lets you still use \`context\` later.
 - Address, Symbol, String, Vec, Bytes do NOT implement Copy. When using any of these more than once, call .clone(): \`address.clone()\`, \`fn_name.clone()\`. NEVER dereference with \`*\` — use .clone() instead. For example, \`target_fn = fn_name.clone()\` not \`target_fn = *fn_name\`.
 - When building structs with Address fields from params, clone each field: \`allowed_contract: params.allowed_contract.clone()\`.
 - Prefer \`#[allow(unused_imports)]\` before your import block to suppress warnings about unused imports.
 
 UNDERSTANDING AUTHORIZATION CONTEXT (CRITICAL):
-This policy may be attached to either a Default or CallContract context rule.
-- CallContract rules scope enforcement to a specific target contract. enforce() receives the DIRECT function call context (Pattern 2 below). This is the most common case for PollyWallet policies.
-- Default rules match ALL auth contexts, meaning enforce() is called for every auth in the transaction and must handle all patterns.
+enforce() receives the host's ORIGINAL authorization context, unchanged — the smart account's
+__check_auth performs no rewriting. But the host produces a DIFFERENT context shape depending
+on how the call was initiated, and your policy must handle the one its context rule will see.
 
-enforce() receives Context::Contract(ContractContext { contract, fn_name, args }) for each authorization. There are TWO patterns — your code MUST handle BOTH:
+SHAPE A — DIRECT CALL (what a CallContract-scoped rule sees):
+The target contract itself calls require_auth(smart_account) — e.g. a token's transfer(). The
+host builds the context from that invocation:
+  - contract = the target contract (e.g. the token)
+  - fn_name  = the real function (e.g. "transfer")
+  - args     = that function's real arguments, positionally
+Apply argument rules directly against args by index.
 
-PATTERN 1 — EXECUTE WRAPPING (Default context rules only):
-When the smart wallet calls execute(target, fn, args), enforce() sees:
-  - fn_name = symbol_short!("execute")
-  - args[0] = target contract Address
-  - args[1] = inner function name (Symbol)
-  - args[2] = inner arguments (Vec<Val>)
-
-To enforce rules, extract the inner call:
+SHAPE B — EXECUTE WRAPPER (what a Default-scoped rule sees):
+The smart account's execute(target, target_fn, target_args) entry point calls
+\`e.current_contract_address().require_auth()\` BEFORE invoking the target. Soroban's
+invoker-auth model builds that requirement's context from the CURRENT invocation, so the
+policy receives:
+  - contract = the smart account itself
+  - fn_name  = "execute"
+  - args[0]  = target contract Address
+  - args[1]  = inner function name (Symbol)
+  - args[2]  = inner arguments (Vec<Val>)
+Unwrap before applying rules:
   let target: Address = args.get(0).unwrap().try_into_val(e).unwrap();
   let inner_fn: Symbol = args.get(1).unwrap().try_into_val(e).unwrap();
   let inner_args: Vec<Val> = args.get(2).unwrap().try_into_val(e).unwrap();
-  // Then apply arg-indexed rules against inner_args
+Then validate target + inner_fn and apply the schema's positional rules to inner_args.
 
-PATTERN 2 — DIRECT CALL (CallContract context rules, or sub-invocations):
-enforce() sees the actual function call directly:
-  - fn_name = the actual function name (e.g. "transfer", "swap", "deposit")
-  - contract = the actual contract address
-  - args = the raw function arguments
-  // Apply arg-indexed rules directly against args
+WHICH SHAPE YOU GET is decided by the context rule this policy is attached to, and the
+generated contract cannot know that at compile time — so HANDLE BOTH. Dispatch on fn_name:
+"execute" takes Shape B, every other name takes Shape A. Both paths must DEFAULT-REJECT.
+
+The two shapes are mutually exclusive per rule, because rule matching keys on
+\`context.contract\`:
+  - A Default rule (or a CallContract rule scoped to the ACCOUNT's own address) matches the
+    execute context and sees Shape B.
+  - A CallContract rule scoped to a TOKEN address is never selected for an execute-routed
+    call at all.
+Critically, under Shape B the inner call is a direct contract-to-contract invocation, which
+Soroban always authorizes — it NEVER appears as a separate authorization context. So when you
+receive an execute context you must enforce every rule against the UNWRAPPED inner target,
+function, and args right there. Do not assume a second enforce() will arrive for the inner
+call. It will not.
+
+Do not conclude from the OpenZeppelin reference policies below that Shape B is unreal: all
+three are CallContract-scoped by design, so they only ever see Shape A. That is a property of
+those policies, not of the platform.
+
+Context can also be a contract-creation variant (CreateContractHostFn /
+CreateContractWithCtorHostFn). Reject those unless the schema explicitly permits creation.
+
+HOW OFTEN enforce() RUNS:
+- Once per (authorization context x attached policy) pair — NOT once per transaction. A
+  transaction with three auth contexts calls your enforce() three times.
+- All policies on a context rule must pass: the semantics are AND.
+- A panic in enforce() aborts the entire transaction. It is a plain call, not a try_ call.
+  (Only uninstall is best-effort, via try_uninstall.)
+- Your policy must therefore be deterministic and idempotent-safe per context.
+
+AUTHENTICATED SIGNERS:
+\`authenticated_signers\` is the smart account's already-verified subset of this context rule's
+signers. It carries signer IDENTITIES only — never signature bytes. Never attempt signature or
+verifier validation in enforce(); the account has already done it. The list MAY be empty for a
+policy-only rule, and MAY be a proper subset. If your policy needs a quorum, check its length
+or its identities explicitly.
 
 UNDERSTANDING CONSTRAINTS AND NOTES (CRITICAL):
 The schema uses per-argument constraints and natural language notes. Each argument has a name, type, and optional constraint.
@@ -552,17 +633,28 @@ Each function and each argument can have a "note" field containing natural langu
 When notes describe rolling sums, rate limits, or stateful behavior, use the spending_limit reference below as an implementation pattern.
 
 CRITICAL RULES FOR ENFORCE:
-1. ALWAYS match on fn_name first. Handle both "execute" (Pattern 1) AND direct function names (Pattern 2).
-2. For "execute" contexts, extract and validate the inner call. Check the target contract address against allowed contracts.
-3. For direct contexts (Pattern 2), validate the contract address and function name.
-4. DEFAULT-REJECT: Any fn_name or contract not explicitly handled MUST panic. Never allow unknown calls to pass silently.
-5. Use a match statement with a catch-all that panics.
-6. For each constrained argument, extract it by index using try_into_val and enforce the constraint.
-7. Store allowed contract addresses and constraint configurations during install(). In enforce(), verify against stored data.
-8. For each allowed contract, only permit its listed functions. Reject any function not explicitly whitelisted per-contract.
-9. Constraints must be keyed by contract+function in storage — not global.
+1. Match on fn_name FIRST. "execute" means Shape B — unwrap args[0..2], then validate the
+   inner target and function. Any other name is Shape A — validate the contract address, then
+   the function name, then the arguments.
+2. DEFAULT-REJECT on BOTH shapes: any contract or fn_name not explicitly permitted MUST panic,
+   whether it arrived directly or inside an execute wrapper. Never allow an unknown call to
+   pass silently. End every match on fn_name with a catch-all arm that panics.
+3. For each constrained argument, extract it by index with try_from_val and enforce the
+   constraint. A failed conversion must panic, not be skipped.
+4. Store the permitted contract addresses and constraint configuration during install(); in
+   enforce(), verify against that stored data rather than against hardcoded literals.
+5. For each permitted contract, allow only its listed functions. Reject any function not
+   explicitly whitelisted for that specific contract.
+6. Constraints must be keyed by contract+function in storage — not global. Two functions that
+   both take an "amount" argument must not share one limit.
+7. Reject non-contract contexts unless the schema explicitly permits them.
 
-Below are COMPLETE reference implementations from the OpenZeppelin Stellar Contracts repository. Study them carefully and mirror their patterns exactly. The spending_limit reference demonstrates the rolling-sum pattern — adapt it for the argument position specified in the schema rather than hardcoding any specific argument index.
+Below are CONDENSED references derived from the OpenZeppelin Stellar Contracts repository. Their logic is faithful, but they are abbreviated and some functions are omitted — mirror their structure and conventions, and do not assume anything absent from them does not exist. The spending_limit reference demonstrates the rolling-sum pattern; adapt it to the argument position given in the schema rather than hardcoding an argument index.
+
+Note their shared conventions, which yours should follow: one persistent storage key
+\`AccountContext(Address, u32)\` = (smart_account, context_rule_id); DAY_IN_LEDGERS = 17_280 with
+EXTEND_AMOUNT = 30 * DAY and TTL_THRESHOLD = EXTEND_AMOUNT - DAY; and events whose ONLY
+#[topic] is \`smart_account: Address\`, with every other field as data.
 
 === POLICY TRAIT DEFINITION ===
 ${POLICY_TRAIT_SOURCE}
@@ -589,40 +681,23 @@ Follow the enforce/install/uninstall patterns from the references exactly.
 Name your contract struct PolicyContract.
 
 IMPORTANT: Your enforce() function MUST:
-- Handle BOTH the "execute" wrapper pattern AND direct contract call patterns (the context rule type determines which fires at runtime, but the code should support both)
-- DEFAULT-REJECT any unrecognized function name or contract address
-- Extract inner call details from execute() args when fn_name is "execute"
+- Handle BOTH context shapes: the direct call (Shape A, CallContract rules) and the
+  execute(target, fn, args) wrapper (Shape B, Default rules). Dispatch on fn_name.
+- DEFAULT-REJECT any unrecognized contract address or function name, on both shapes
 - Apply argument rules using positional indices matching the schema's arg order (0, 1, 2, ...)
 - ONLY enforce constraints that are explicitly declared in the schema — unconstrained arguments must pass through without any checks
-- Be called potentially multiple times per transaction (once per auth context)`;
+- Be safe when called multiple times per transaction (once per auth context per policy)`;
 }
 
-/** Build a list of install_params keys that the test harness will send. */
+/**
+ * The install_params keys this policy will receive. Derived from the shared
+ * `installParamsSpec()` so the prompt, the generated tests, and the on-chain deploy path
+ * cannot drift — see the note above that function.
+ */
 function buildInstallParamsKeyList(schema: PolicySchema): string {
-  const keys: string[] = [];
-  for (const contract of schema.contracts) {
-    for (const func of contract.functions) {
-      for (const arg of func.args) {
-        if (!arg.constraint || arg.constraint.kind === "unconstrained") continue;
-        if (arg.constraint.kind === "range") {
-          if (arg.constraint.max) keys.push(`- "max_${arg.name}" (i128): maximum allowed value for ${arg.name}`);
-          if (arg.constraint.min) keys.push(`- "min_${arg.name}" (i128): minimum allowed value for ${arg.name}`);
-        }
-        if (arg.constraint.kind === "allowlist") {
-          keys.push(`- "allowed_${arg.name}" (bool): flag that allowlist is enabled for ${arg.name}`);
-        }
-      }
-    }
-  }
-  for (const rule of schema.globalRules) {
-    if (rule.type === "threshold") keys.push(`- "threshold" (u32): minimum number of signers required (value: ${rule.params.threshold})`);
-    if (rule.type === "time_lock") {
-      if (rule.params.validAfterLedger != null) keys.push(`- "valid_after_ledger" (u32): earliest allowed ledger`);
-      if (rule.params.validUntilLedger != null) keys.push(`- "valid_until_ledger" (u32): latest allowed ledger`);
-    }
-  }
-  if (keys.length === 0) return "  (no configuration needed — install_params may be Val::VOID)";
-  return keys.join("\n");
+  const spec = installParamsSpec(schema);
+  if (spec.length === 0) return "  (no configuration needed — install_params may be Val::VOID)";
+  return spec.map(p => `- "${p.key}" (${p.type}): ${p.description}`).join("\n");
 }
 
 export function buildUserPrompt(schema: PolicySchema): string {
@@ -694,12 +769,13 @@ ${contractSummary}
 Global rules: ${schema.globalRules.map(r => r.type).join(", ") || "none"}
 
 INSTALL PARAMS FORMAT:
-install_params is a Map<Val, Val> with these Symbol keys (decode each with .get() and .unwrap_or(default)):
+install_params is a Map<Val, Val> with these Symbol keys. Decode each with .get() and
+try_from_val, and PANIC if a key is missing or unparseable — every key below is REQUIRED
+configuration for this policy. Do not substitute a permissive default.
 ${buildInstallParamsKeyList(schema)}
 
 CRITICAL SECURITY REQUIREMENTS:
-- This policy will be attached to a CallContract context rule scoped to the contract(s) listed below. enforce() will receive DIRECT call contexts (Pattern 2). However, the code should also handle execute() wrapper calls (Pattern 1) for forward compatibility.
-- The enforce() function must handle both execute() wrapper calls and direct contract calls
+- This policy will be attached to a CallContract context rule scoped to the contract(s) listed below. enforce() receives the host's original direct call context.
 - ONLY the contracts listed above are permitted. ALL other contracts must be REJECTED (panic).
 - ONLY the functions listed under each contract are permitted. ALL other functions must be REJECTED.
 - Each function's constraints apply ONLY to that specific contract+function combination.
@@ -732,7 +808,7 @@ COMMON FIXES:
 - Remove any imports that are truly unused (or add #[allow(unused_imports)]).
 - symbol_short!() only supports ≤9 char literals. For longer names, use Symbol::new(env, "name").
 - install must take Val: \`pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)\`
-- "doesn't implement Debug": Context does NOT implement Debug. Remove Debug from #[derive(...)] on any struct containing Context. Use only the fields you need (fn_name, contract) instead of the full Context in events.
+- "doesn't implement PartialEq"/"doesn't implement Eq" on a struct containing Context: Context derives Clone and Debug but NOT PartialEq/Eq on soroban-sdk 27.0.5. Remove PartialEq/Eq from the derive list (Debug can stay), or store only the fields you need (fn_name, contract) instead of the whole Context.
 - "borrow of partially moved value: context": When matching Context::Contract(ContractContext { contract, fn_name, args }), change args to ref args: \`Context::Contract(ContractContext { contract, fn_name, ref args })\`
 - "use of moved value" or "cannot move out of" for Address/Symbol/String/Vec: These types don't implement Copy. Use .clone() instead of dereferencing: \`fn_name.clone()\` not \`*fn_name\`
 - "cannot find type" errors: check that Signer, ContextRule, ContextRuleType are defined as #[contracttype] types in the file
@@ -772,6 +848,10 @@ function validateFixInput(data: unknown): FixInput {
   if (typeof rustCode !== "string" || !rustCode) throw new Error("rustCode is required");
   if (typeof compileErrors !== "string" || !compileErrors) throw new Error("compileErrors is required");
   if (rustCode.length > 100_000) throw new Error("rustCode exceeds maximum size");
+  // An abuse bound, NOT a functional one. A real failing build measured 37,642 chars of
+  // diagnostics after noise-stripping, so a tight cap here would reject legitimate input and
+  // block the auto-fix path entirely. Callers compact via compactCompileErrors() first.
+  if (compileErrors.length > 100_000) throw new Error("compileErrors exceeds maximum size");
   return { rustCode, compileErrors };
 }
 
@@ -796,7 +876,31 @@ export interface GenerateChunk {
   reasoningCount?: number;
 }
 
-const POLICY_CODEGEN_TOKEN_BUDGET = 16_384;
+/**
+ * Reasoning and code SHARE this budget. K2.7 Code always reasons, its reasoning is billed as
+ * output, and `reasoning_content + content <= max_tokens`. Measured against the live endpoint
+ * 2026-08-07: reasoning is 70-87% of every completion, and the same trivial schema produced
+ * 6,578 and 14,947 completion tokens on consecutive runs — output size is stable, reasoning
+ * length is what varies.
+ *
+ * At 16,384 a typical two-contract schema truncated (`finish_reason: "length"`) and emitted
+ * unbuildable Rust; two other production runs emitted zero bytes. The same run at 32,768
+ * finished cleanly at 28,504 completion tokens — 74% more than the entire old budget — leaving
+ * only 13% headroom, so 49,152 is the defensible value.
+ *
+ * This is a CEILING, not a reservation: you are billed for tokens generated, not budgeted, so
+ * raising it costs nothing when unused. Model max output is 262,144, shared with the prompt.
+ */
+export const POLICY_CODEGEN_TOKEN_BUDGET = 49_152;
+
+/**
+ * Constant, NOT per-user. The cached prefix is the ~6,275-token system prompt shared by every
+ * request, so all traffic should land on one instance; a per-user key would fragment it.
+ * Prefix caching itself is automatic on Workers AI (measured 99-100% hit rate, 64-token
+ * blocks) — this header only raises the hit rate by improving routing.
+ */
+const POLICY_CODEGEN_AFFINITY = "pollywallet-policy-codegen";
+
 type PromptCacheUsage = { promptTokens: number; cachedTokens: number };
 
 /**
@@ -838,11 +942,25 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
         stream: true,
         max_tokens: POLICY_CODEGEN_TOKEN_BUDGET,
         temperature: 0.1,
-        // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
-        // endpoint — the default splits reasoning into `delta.reasoning_content` (which
-        // extractTokenFromChunk ignores) and leaves `delta.content` as pure fenced code.
-        // Passing `thinking: false` does NOT disable reasoning; it merges the reasoning
-        // prose INTO `delta.content`, poisoning codeBuffer with non-Rust text.
+        // Makes the `usage` block reliably present in the SSE stream, which is what
+        // extractPromptCacheUsage reads. Without it the block only sometimes arrives.
+        stream_options: { include_usage: true },
+        // No chat_template_kwargs: K2.7 Code CANNOT be made to stop reasoning. Measured
+        // against the live endpoint 2026-08-07:
+        //  - `enable_thinking: false` — the actual schema key, documented default true — is
+        //    an inert no-op; reasoning still arrives on delta.reasoning_content.
+        //  - `thinking: false` is NOT a schema key and is actively harmful: it drops the
+        //    reasoning_content channel so reasoning prose lands in delta.content, poisoning
+        //    codeBuffer with non-Rust text. (The original comment here tested this correctly;
+        //    only its key name was wrong.)
+        //  - `reasoning_effort` is server-validated (none|low|medium|high|max) but its effect
+        //    is unreliable — two independent measurement passes moved in opposite directions,
+        //    and "low" still truncated on a typical schema. "none" fails exactly like
+        //    `thinking: false`. Left unset deliberately; see PLAN.md for the open experiment.
+        // Upstream forces reasoning: the shipped chat template ends the prompt with a literal
+        // <think>. Passing nothing is correct.
+      }, {
+        extraHeaders: { "x-session-affinity": POLICY_CODEGEN_AFFINITY },
       })) as unknown as ReadableStream;
 
       const reader = aiStream.getReader();
@@ -967,11 +1085,25 @@ export const fixPolicyCode = createServerFn({ method: "POST" })
         stream: true,
         max_tokens: POLICY_CODEGEN_TOKEN_BUDGET,
         temperature: 0.1,
-        // No chat_template_kwargs: K2.7 Code always reasons. Verified against the live
-        // endpoint — the default splits reasoning into `delta.reasoning_content` (which
-        // extractTokenFromChunk ignores) and leaves `delta.content` as pure fenced code.
-        // Passing `thinking: false` does NOT disable reasoning; it merges the reasoning
-        // prose INTO `delta.content`, poisoning codeBuffer with non-Rust text.
+        // Makes the `usage` block reliably present in the SSE stream, which is what
+        // extractPromptCacheUsage reads. Without it the block only sometimes arrives.
+        stream_options: { include_usage: true },
+        // No chat_template_kwargs: K2.7 Code CANNOT be made to stop reasoning. Measured
+        // against the live endpoint 2026-08-07:
+        //  - `enable_thinking: false` — the actual schema key, documented default true — is
+        //    an inert no-op; reasoning still arrives on delta.reasoning_content.
+        //  - `thinking: false` is NOT a schema key and is actively harmful: it drops the
+        //    reasoning_content channel so reasoning prose lands in delta.content, poisoning
+        //    codeBuffer with non-Rust text. (The original comment here tested this correctly;
+        //    only its key name was wrong.)
+        //  - `reasoning_effort` is server-validated (none|low|medium|high|max) but its effect
+        //    is unreliable — two independent measurement passes moved in opposite directions,
+        //    and "low" still truncated on a typical schema. "none" fails exactly like
+        //    `thinking: false`. Left unset deliberately; see PLAN.md for the open experiment.
+        // Upstream forces reasoning: the shipped chat template ends the prompt with a literal
+        // <think>. Passing nothing is correct.
+      }, {
+        extraHeaders: { "x-session-affinity": POLICY_CODEGEN_AFFINITY },
       })) as unknown as ReadableStream;
 
       const reader = aiStream.getReader();
@@ -1095,22 +1227,8 @@ export async function requestFixCode(
     reasoning?: boolean;
   }) => void,
 ): Promise<{ success: boolean; error: string | null; code: string | null }> {
-  // Strip dependency compilation noise — only send actual errors/warnings
-  const cleanErrors = compileErrors
-    .split("\n")
-    .filter(line => {
-      const trimmed = line.trim();
-      return trimmed !== "" &&
-        !trimmed.startsWith("Compiling ") &&
-        !trimmed.startsWith("Downloading ") &&
-        !trimmed.startsWith("Downloaded ") &&
-        !trimmed.startsWith("Blocking ");
-    })
-    .join("\n")
-    .trim();
-
   const generator = await fixPolicyCode({
-    data: { rustCode, compileErrors: cleanErrors || compileErrors },
+    data: { rustCode, compileErrors: compactCompileErrors(compileErrors) },
   });
 
   const startTime = Date.now();
@@ -1144,6 +1262,44 @@ export async function requestFixCode(
   if (error) return { success: false, error, code: null };
   if (!finalCode) return { success: false, error: "AI returned empty response", code: null };
   return { success: true, error: null, code: finalCode };
+}
+
+/** Budget for compiler diagnostics sent to the fix pass, in characters. */
+const COMPILE_ERROR_BUDGET = 20_000;
+
+/**
+ * Strip dependency-compilation noise and bound the result.
+ *
+ * A real failing build measured 37,642 chars across 39 diagnostics AFTER noise-stripping, so
+ * this must truncate rather than reject — an over-budget log is exactly the case where the fix
+ * pass is most needed. Cargo emits root causes first and cascading errors after, so the head is
+ * the useful part; truncation is from the tail, on a line boundary, with an explicit marker so
+ * the model knows the list is partial rather than assuming it has seen every error.
+ */
+export function compactCompileErrors(raw: string): string {
+  const lines = raw.split("\n").filter(line => {
+    const t = line.trim();
+    return t !== "" &&
+      !t.startsWith("Compiling ") &&
+      !t.startsWith("Downloading ") &&
+      !t.startsWith("Downloaded ") &&
+      !t.startsWith("Blocking ");
+  });
+
+  const cleaned = lines.join("\n").trim() || raw.trim();
+  if (cleaned.length <= COMPILE_ERROR_BUDGET) return cleaned;
+
+  const total = (cleaned.match(/^error(\[[^\]]+\])?:/gm) ?? []).length;
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of cleaned.split("\n")) {
+    if (used + line.length + 1 > COMPILE_ERROR_BUDGET) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  const shown = (kept.join("\n").match(/^error(\[[^\]]+\])?:/gm) ?? []).length;
+
+  return `${kept.join("\n")}\n\n[truncated: showing the first ${shown} of ${total} errors. Fix these first; the rest are likely cascading.]`;
 }
 
 // --- Helpers ---

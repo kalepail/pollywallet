@@ -17,19 +17,62 @@ import {
   extractReasoningFromChunk,
   streamPolicyCode,
   fixPolicyCode,
+  POLICY_CODEGEN_TOKEN_BUDGET,
+  compactCompileErrors,
 } from "../policy-codegen";
 import { schemaFromPatterns, type PolicySchema, type TxPattern, SCHEMA_VERSION } from "../policy-schema";
 
 describe("buildSystemPrompt", () => {
-  it("should contain dual-context guidance and constraint descriptions", () => {
+  it("should contain context guidance and constraint descriptions", () => {
     const prompt = buildSystemPrompt();
-    expect(prompt).toContain("PATTERN 1");
-    expect(prompt).toContain("PATTERN 2");
-    expect(prompt).toContain("execute");
     expect(prompt).toContain("DEFAULT-REJECT");
     expect(prompt).toContain("CONSTRAINT KINDS");
     expect(prompt).toContain("allowlist");
     expect(prompt).toContain("NOTES");
+    expect(prompt).toContain("authenticated_signers");
+  });
+
+  // The execute() wrapper context is REAL, and a previous revision of this prompt wrongly
+  // told the model it was a fiction. The smart account's execute(target, fn, args) calls
+  // e.current_contract_address().require_auth() before invoking the target; Soroban's
+  // invoker-auth model builds that requirement's context from the CURRENT invocation, so a
+  // Default-scoped rule sees fn_name == "execute" with args[0..2]. This repo's own default
+  // send path does exactly that — see src/hooks/useWallet.ts, "Default: wallet.execute()
+  // wrapper". OpenZeppelin's reference policies never handle it only because all three are
+  // CallContract-scoped.
+  it("teaches BOTH context shapes, including the execute() wrapper", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("SHAPE A");
+    expect(prompt).toContain("SHAPE B");
+    expect(prompt).toContain("execute");
+    expect(prompt).toMatch(/args\[0\]\s+= target contract Address/);
+    expect(prompt).toContain("HANDLE BOTH");
+    // The false claim must never come back.
+    expect(prompt).not.toContain("There is exactly ONE shape");
+    expect(prompt).not.toMatch(/No such context is ever delivered/);
+  });
+
+  // Falling back to a permissive value on missing config turns a malformed install into a
+  // policy that authorizes everything — the exact inverse of its purpose.
+  it("must instruct the model to fail closed on install params", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("FAIL CLOSED");
+    // The prompt names `unwrap_or(i128::MAX)` on purpose — as a prohibited anti-pattern.
+    // What must never come back is the old instruction to actually do it.
+    expect(prompt).toContain("Never substitute a permissive fallback");
+    expect(prompt).not.toMatch(/use maximum\/permissive defaults/);
+    expect(prompt).not.toMatch(/so install succeeds even if a key is missing/);
+  });
+
+  // Reads the version out of CARGO_TOML_TEMPLATE rather than hardcoding it, so this actually
+  // catches the drift it exists to catch: bumping the sandbox's SDK without updating the
+  // prompt (which is how the prompt ended up telling the model to target 25.3 while the
+  // sandbox compiled 27.0.5).
+  it("targets the same soroban-sdk version the sandbox actually builds", async () => {
+    const { CARGO_TOML_TEMPLATE } = await import("../policy-sandbox");
+    const version = CARGO_TOML_TEMPLATE.match(/soroban-sdk = "([^"]+)"/)?.[1];
+    expect(version).toBeTruthy();
+    expect(buildSystemPrompt()).toContain(`soroban-sdk = "${version}"`);
   });
 });
 
@@ -40,12 +83,12 @@ describe("buildUserPrompt", () => {
       name: "default-policy",
       description: "A default context policy",
       contracts: [{
-        address: "CTOKENADDR",
+        address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
         functions: [{
           name: "transfer",
           args: [
             { name: "from", type: "address" },
-            { name: "to", type: "address", constraint: { kind: "allowlist", values: ["GDEST"] } },
+            { name: "to", type: "address", constraint: { kind: "allowlist", values: ["GABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQHGPC"] } },
             { name: "amount", type: "i128", constraint: { kind: "range", max: "1000000" } },
           ],
           note: "Enforce rolling window on amount over 17280 ledgers",
@@ -55,10 +98,10 @@ describe("buildUserPrompt", () => {
     };
 
     const prompt = buildUserPrompt(schema);
-    expect(prompt).toContain("CTOKENADDR");
+    expect(prompt).toContain("CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526");
     expect(prompt).toContain("transfer(from: address, to: address, amount: i128)");
     expect(prompt).toContain("allowlist");
-    expect(prompt).toContain("GDEST");
+    expect(prompt).toContain("GABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQHGPC");
     expect(prompt).toContain("range");
     expect(prompt).toContain("rolling window");
   });
@@ -69,7 +112,7 @@ describe("buildUserPrompt", () => {
       name: "global-policy",
       description: "A policy with globals",
       contracts: [{
-        address: "CTOKENADDR",
+        address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
         functions: [{ name: "transfer", args: [] }],
       }],
       globalRules: [
@@ -87,12 +130,12 @@ describe("buildUserPrompt", () => {
 describe("end-to-end: execute pattern -> schema -> prompt", () => {
   it("should produce a prompt with the innerCall target contract", () => {
     const patterns: TxPattern[] = [{
-      contractAddress: "CWALLET",
+      contractAddress: "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ",
       functionName: "execute",
       args: [],
       signers: [{ type: "External", identity: "GSIGNER" }],
       innerCall: {
-        targetContract: "CTARGET123",
+        targetContract: "CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U",
         functionName: "transfer",
         args: [
           { type: "Address", value: "GFROM" },
@@ -105,7 +148,7 @@ describe("end-to-end: execute pattern -> schema -> prompt", () => {
     const schema = schemaFromPatterns(patterns);
     const prompt = buildUserPrompt(schema);
 
-    expect(prompt).toContain("CTARGET123");
+    expect(prompt).toContain("CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U");
     expect(prompt).toContain("transfer");
   });
 });
@@ -165,10 +208,13 @@ describe("streaming truncation", () => {
     $schema: SCHEMA_VERSION,
     name: "truncation-test",
     description: "Test policy",
-    contracts: [{ address: "CTEST", functions: [{ name: "test", args: [] }] }],
+    contracts: [{ address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526", functions: [{ name: "test", args: [] }] }],
     globalRules: [],
   };
-  const truncationError = "AI response was truncated at the 16,384-token generation budget.";
+  // Derived, not hardcoded: the budget is tuned against measured reasoning-token usage and
+  // moves. The assertion is about the message, not the number.
+  const truncationError =
+    `AI response was truncated at the ${POLICY_CODEGEN_TOKEN_BUDGET.toLocaleString("en-US")}-token generation budget.`;
   const missingTerminalError = "AI response stream ended before a terminal marker was received.";
 
   function requests() {
@@ -277,5 +323,48 @@ describe("streaming truncation", () => {
     } finally {
       consoleLog.mockRestore();
     }
+  });
+});
+
+describe("compactCompileErrors", () => {
+  const noisy = [
+    "Compiling soroban-sdk v27.0.5",
+    "Downloading crates ...",
+    "Blocking waiting for file lock",
+    "error[E0308]: mismatched types",
+    " --> src/lib.rs:145:42",
+    "",
+    "error: aborting due to 1 previous error",
+  ].join("\n");
+
+  it("strips dependency noise but keeps diagnostics", () => {
+    const out = compactCompileErrors(noisy);
+    expect(out).toContain("error[E0308]: mismatched types");
+    expect(out).not.toContain("Compiling soroban-sdk");
+    expect(out).not.toContain("Downloading");
+    expect(out).not.toContain("Blocking");
+  });
+
+  // Regression guard. A real failing build measured 37,642 chars across 39 diagnostics AFTER
+  // noise-stripping. An earlier revision capped this input and THREW above 20,000, which
+  // disabled the auto-fix path in exactly the case that needs it most.
+  it("truncates a realistically huge log instead of rejecting it", () => {
+    const oneError = "error[E0425]: cannot find value `x` in this scope\n --> src/lib.rs:1:1\n";
+    const huge = oneError.repeat(600); // ~46k chars, 600 diagnostics
+    expect(huge.length).toBeGreaterThan(37_000);
+
+    const out = compactCompileErrors(huge);
+    expect(out.length).toBeLessThan(21_000);
+    expect(out).toContain("error[E0425]");
+    expect(out).toMatch(/\[truncated: showing the first \d+ of 600 errors/);
+    // Must stay under the server-side bound so the fix request is actually accepted.
+    expect(out.length).toBeLessThan(100_000);
+  });
+
+  it("keeps the head, because cargo emits root causes before cascading errors", () => {
+    const first = "error[E0001]: THE ROOT CAUSE\n";
+    const rest = "error[E0999]: cascading\n --> src/lib.rs:9:9\n".repeat(900);
+    const out = compactCompileErrors(first + rest);
+    expect(out).toContain("THE ROOT CAUSE");
   });
 });

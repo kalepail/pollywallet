@@ -21,7 +21,7 @@ function validSchema(overrides?: Partial<PolicySchema>): PolicySchema {
     description: "A test policy",
     contracts: [
       {
-        address: "CABCDEF",
+        address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
         functions: [
           {
             name: "transfer",
@@ -90,7 +90,7 @@ describe("validateSchema", () => {
 
   it("should reject contract without functions", () => {
     const result = validateSchema(
-      validSchema({ contracts: [{ address: "CABCDEF", functions: [] }] })
+      validSchema({ contracts: [{ address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526", functions: [] }] })
     );
     expect(result.valid).toBe(false);
   });
@@ -102,11 +102,11 @@ describe("validateSchema", () => {
       const result = validateSchema(
         validSchema({
           contracts: [{
-            address: "CABCDEF",
+            address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
             functions: [{
               name: "transfer",
               args: [
-                { name: "to", type: "address", constraint: { kind: "allowlist", values: ["GABCDEF"] } },
+                { name: "to", type: "address", constraint: { kind: "allowlist", values: ["GABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQHGPC"] } },
               ],
             }],
           }],
@@ -119,7 +119,7 @@ describe("validateSchema", () => {
       const result = validateSchema(
         validSchema({
           contracts: [{
-            address: "CABCDEF",
+            address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
             functions: [{
               name: "transfer",
               args: [
@@ -137,7 +137,7 @@ describe("validateSchema", () => {
       const result = validateSchema(
         validSchema({
           contracts: [{
-            address: "CABCDEF",
+            address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
             functions: [{
               name: "transfer",
               args: [
@@ -154,7 +154,7 @@ describe("validateSchema", () => {
       const result = validateSchema(
         validSchema({
           contracts: [{
-            address: "CABCDEF",
+            address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
             functions: [{
               name: "transfer",
               args: [
@@ -171,7 +171,7 @@ describe("validateSchema", () => {
       const result = validateSchema(
         validSchema({
           contracts: [{
-            address: "CABCDEF",
+            address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
             functions: [{
               name: "transfer",
               args: [
@@ -189,7 +189,7 @@ describe("validateSchema", () => {
       const result = validateSchema(
         validSchema({
           contracts: [{
-            address: "CABCDEF",
+            address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
             functions: [{
               name: "transfer",
               args: [
@@ -283,11 +283,11 @@ describe("schemaToJSON / schemaFromJSON", () => {
   it("should round-trip schema with constraints", () => {
     const schema = validSchema({
       contracts: [{
-        address: "CABCDEF",
+        address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
         functions: [{
           name: "transfer",
           args: [
-            { name: "to", type: "address", constraint: { kind: "allowlist", values: ["GADDR1"] } },
+            { name: "to", type: "address", constraint: { kind: "allowlist", values: ["GACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAJJHP"] } },
             { name: "amount", type: "i128", constraint: { kind: "range", max: "1000" } },
           ],
           note: "Limit transfers to approved addresses",
@@ -300,7 +300,7 @@ describe("schemaToJSON / schemaFromJSON", () => {
 
     expect(restored.contracts[0].functions[0].args[0].constraint).toEqual({
       kind: "allowlist",
-      values: ["GADDR1"],
+      values: ["GACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAJJHP"],
     });
     expect(restored.contracts[0].functions[0].note).toBe("Limit transfers to approved addresses");
   });
@@ -320,7 +320,7 @@ describe("schemaFromPatterns", () => {
 
   it("should generate schema with arg permissions from patterns", () => {
     const patterns: TxPattern[] = [{
-      contractAddress: "CTOKENADDR",
+      contractAddress: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
       functionName: "transfer",
       args: [
         { type: "Address", value: "GSOURCE" },
@@ -332,7 +332,7 @@ describe("schemaFromPatterns", () => {
 
     const schema = schemaFromPatterns(patterns);
     expect(schema.contracts.length).toBe(1);
-    expect(schema.contracts[0].address).toBe("CTOKENADDR");
+    expect(schema.contracts[0].address).toBe("CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526");
 
     const func = schema.contracts[0].functions[0];
     expect(func.name).toBe("transfer");
@@ -343,12 +343,12 @@ describe("schemaFromPatterns", () => {
 
   it("should use innerCall for execute() patterns", () => {
     const patterns: TxPattern[] = [{
-      contractAddress: "CWALLET",
+      contractAddress: "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ",
       functionName: "execute",
       args: [],
       signers: [{ type: "External", identity: "GSIGNER" }],
       innerCall: {
-        targetContract: "CTARGET",
+        targetContract: "CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U",
         functionName: "transfer",
         args: [
           { type: "Address", value: "GFROM" },
@@ -359,14 +359,14 @@ describe("schemaFromPatterns", () => {
     }];
 
     const schema = schemaFromPatterns(patterns);
-    expect(schema.contracts[0].address).toBe("CTARGET");
+    expect(schema.contracts[0].address).toBe("CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U");
     expect(schema.contracts[0].functions[0].name).toBe("transfer");
     expect(schema.contracts[0].functions[0].args.length).toBe(3);
   });
 
   it("should add threshold when multiple signers", () => {
     const patterns: TxPattern[] = [{
-      contractAddress: "CTOKEN",
+      contractAddress: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
       functionName: "transfer",
       args: [],
       signers: [
@@ -398,7 +398,7 @@ describe("schemaFromPatterns", () => {
 describe("mergeSpecIntoSchema", () => {
   it("should enrich arg names and types from spec", () => {
     const schema = schemaFromPatterns([{
-      contractAddress: "CTOKEN",
+      contractAddress: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
       functionName: "transfer",
       args: [
         { type: "Address", value: "GFROM" },
@@ -408,7 +408,7 @@ describe("mergeSpecIntoSchema", () => {
       signers: [{ type: "External", identity: "G1" }],
     }]);
 
-    const merged = mergeSpecIntoSchema(schema, "CTOKEN", [
+    const merged = mergeSpecIntoSchema(schema, "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526", [
       {
         name: "transfer",
         inputs: [

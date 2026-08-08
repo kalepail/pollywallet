@@ -18,10 +18,29 @@ interface TestRequest {
   testCode: string;
 }
 
+/**
+ * The container that compiles and RUNS untrusted, AI-generated Rust. `cargo test` builds and
+ * executes a native host binary, so a generated `lib.rs` that omits `#![no_std]` can use
+ * std::fs / std::process / sockets for the length of the test timeout. Treat everything in
+ * this container as readable by an attacker.
+ */
 const SANDBOX_ID = "policy-compiler";
 
-/** Track whether we've fetched dependencies in this container lifetime. */
-let depsFetched = false;
+/**
+ * Deployment runs in a SEPARATE sandbox, and this is a security boundary, not tidiness.
+ * stellar-cli writes the funded `deployer` identity to ~/.config/stellar/identities/ as the
+ * same Unix user that hostile test code runs as. While deploy shared SANDBOX_ID, any
+ * generated test could read that seed and exfiltrate it through the streamed test output.
+ * Distinct ids mean distinct Durable Objects, hence distinct containers and filesystems.
+ * Never run untrusted code under this id.
+ */
+const DEPLOY_SANDBOX_ID = "policy-deployer";
+
+/**
+ * Where the image staged its prebuilt dependency graphs and the Cargo.lock they were compiled
+ * from. See sandbox-worker/Dockerfile.
+ */
+const PREBUILD_DIR = "/opt/policy-prebuild";
 
 /**
  * Each request gets its own project directory. All requests previously shared
@@ -38,6 +57,50 @@ function newProjectDir(): string {
   return `/workspace/policy-${crypto.randomUUID()}`;
 }
 
+/**
+ * Best-effort purge of credentials left over from when deploy shared this container.
+ *
+ * This is NOT key rotation. It deletes a key that untrusted test code may already have read,
+ * so it limits future exposure and nothing more. The exposed key must be treated as
+ * compromised and abandoned independently of this. Idempotent and cheap; failures are
+ * swallowed so cleanup can never break a build.
+ */
+async function purgeStaleCredentials(sandbox: ReturnType<typeof getSandbox>) {
+  await sandbox
+    .exec("rm -rf ~/.config/stellar/identities /root/.config/stellar/identities")
+    .catch(() => {
+      // Best-effort: never fail a build because cleanup could not run.
+    });
+}
+
+/** Remove a finished job's project directory. Nothing else ever deletes these. */
+async function removeProjectDir(
+  sandbox: ReturnType<typeof getSandbox>,
+  projectDir: string
+) {
+  // Guard the interpolation: only ever delete a path this module generated.
+  if (!/^\/workspace\/policy-[0-9a-f-]{36}$/.test(projectDir)) return;
+  await sandbox.exec(`rm -rf ${projectDir}`).catch(() => {});
+}
+
+/**
+ * Reuse the Cargo.lock the image's prebuilt artifacts were compiled from.
+ *
+ * Without it, cargo re-resolves versions per request and a newer semver-compatible release
+ * silently invalidates the entire prebuilt dependency graph — putting you back on cold builds
+ * while the image still carries the (now useless) 1.3 GiB of artifacts.
+ */
+async function seedLockfile(
+  sandbox: ReturnType<typeof getSandbox>,
+  projectDir: string
+) {
+  await sandbox
+    .exec(`cp ${PREBUILD_DIR}/Cargo.lock ${projectDir}/Cargo.lock`)
+    .catch(() => {
+      // Older image without a prebuild: fall through and let cargo resolve normally.
+    });
+}
+
 async function setupProject(
   sandbox: ReturnType<typeof getSandbox>,
   projectDir: string,
@@ -47,21 +110,7 @@ async function setupProject(
   await sandbox.exec(`mkdir -p ${projectDir}/src`);
   await sandbox.writeFile(`${projectDir}/Cargo.toml`, cargoToml);
   await sandbox.writeFile(`${projectDir}/src/lib.rs`, libRs);
-
-  // Fetch dependencies separately on first run. This can take 60-120s
-  // on a cold container (downloading ~180 crates). Subsequent runs hit
-  // the local cargo cache and are instant.
-  if (!depsFetched) {
-    const fetchResult = await sandbox.exec(`${CARGO_ENV} cargo fetch 2>&1`, {
-      cwd: projectDir,
-      timeout: 300_000, // 5 minutes for cold dependency download
-    });
-    if (fetchResult.success) {
-      depsFetched = true;
-    }
-    // Even if fetch fails (network issue), try building anyway —
-    // the prefetched crates from the Docker image may be enough.
-  }
+  await seedLockfile(sandbox, projectDir);
 }
 
 async function handleCompile(
@@ -82,9 +131,11 @@ async function handleCompile(
   const projectDir = newProjectDir();
 
   try {
+    await purgeStaleCredentials(sandbox);
     await setupProject(sandbox, projectDir, cargoToml, libRs);
 
-    // Build the contract using stellar-cli (deps already fetched in setupProject)
+    // Dependencies are prebuilt into CARGO_TARGET_DIR by the image; setupProject seeded the
+    // matching Cargo.lock so this reuses them instead of recompiling ~180 crates.
     const buildResult = await sandbox.exec(
       `${CARGO_ENV} stellar contract build --out-dir target`,
       {
@@ -143,6 +194,11 @@ async function handleCompile(
       { success: false, errors: [message], warnings: [], wasmBase64: null },
       { status: 500 }
     );
+  } finally {
+    // Nothing else deletes these. Every request creates a new project dir, so without this
+    // the shared container's disk grows without bound and each job's source stays readable
+    // by the next job's untrusted test code.
+    await removeProjectDir(sandbox, projectDir);
   }
 }
 
@@ -187,13 +243,20 @@ async function handleTestStream(
 
       let output = "";
       try {
+        await purgeStaleCredentials(sandbox);
         send({ type: "log", text: `Writing project to ${projectDir}` });
         await sandbox.exec(`mkdir -p ${projectDir}/src`);
         await sandbox.writeFile(`${projectDir}/Cargo.toml`, cargoToml);
         await sandbox.writeFile(`${projectDir}/src/lib.rs`, fullLibRs);
-        send({ type: "log", text: "$ cargo test" });
+        // Same lockfile the image's prebuilt artifacts were compiled from — without it cargo
+        // re-resolves and can miss the whole warm cache.
+        await seedLockfile(sandbox, projectDir);
+        send({ type: "log", text: "$ cargo test --locked --offline" });
 
-        const events = await sandbox.execStream(`${CARGO_ENV} cargo test 2>&1`, {
+        // --locked: never re-resolve, so the prebuilt dependency graph stays valid.
+        // --offline: every dependency is already vendored in the image; going to the network
+        // here means something is wrong, and failing fast beats a silent 2-minute download.
+        const events = await sandbox.execStream(`${CARGO_ENV} cargo test --locked --offline 2>&1`, {
           cwd: projectDir,
           timeout: 300_000,
         });
@@ -224,6 +287,7 @@ async function handleTestStream(
           },
         });
       } finally {
+        await removeProjectDir(sandbox, projectDir);
         controller.close();
       }
     },
@@ -252,7 +316,8 @@ async function handleDeploy(
     );
   }
 
-  const sandbox = getSandbox(env.Sandbox, SANDBOX_ID);
+  // Deploy-only container — holds the signing key, never runs untrusted code.
+  const sandbox = getSandbox(env.Sandbox, DEPLOY_SANDBOX_ID);
   const projectDir = newProjectDir();
 
   try {
@@ -420,6 +485,8 @@ async function handleDeploy(
       { success: false, error: message, wasmHash: null, contractAddress: null },
       { status: 500 }
     );
+  } finally {
+    await removeProjectDir(sandbox, projectDir);
   }
 }
 

@@ -1,4 +1,14 @@
 import { describe, it, expect } from "vitest";
+
+describe("empty suites are not passes", () => {
+  it("reports failure when cargo exits 0 but no tests ran", () => {
+    // A crate-level `#![cfg(any())]` disables the appended test module, so cargo prints
+    // "running 0 tests" and exits 0. Nothing was proven, so this must not be a pass.
+    const result = parseTestOutput("running 0 tests\n\ntest result: ok. 0 passed; 0 failed\n", true);
+    expect(result.testCases).toHaveLength(0);
+    expect(result.success).toBe(false);
+  });
+});
 import { parseTestOutput } from "./parse-test-output";
 
 /** Verbatim shape of `cargo test` output, including the " - should panic" suffix. */

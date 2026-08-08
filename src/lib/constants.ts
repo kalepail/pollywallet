@@ -1,8 +1,13 @@
 /**
  * Workers AI model used for policy Rust codegen and the compile-error fix pass.
- * Requires the Workers Paid plan (free plan returns 403 / error 5035).
+ * Requires the Workers Paid plan (free plan returns 403 / error 5035 — verified still true).
  * Deprecations alias silently — check the model page before assuming this still resolves.
- * Callers deliberately pass no `chat_template_kwargs`; see the note at the ai.run() sites.
+ * (`kimi-k2.5` has been auto-aliased to k2.6 since 2026-05-30.)
+ *
+ * Measured 2026-08-07: 262,144-token context and max output; $0.95/M input, $0.19/M cached,
+ * $4.00/M output; 20 rpm per account/model; no batch API on this model.
+ * Callers deliberately pass no `chat_template_kwargs` and no `reasoning_effort`; see the
+ * note at the ai.run() sites for the measured reasons.
  */
 export const POLICY_CODEGEN_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 

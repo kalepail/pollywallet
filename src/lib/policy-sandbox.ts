@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
 import type { PolicySchema, ArgPermission } from "./policy-schema";
+import { installParamsSpec, schemaToJSON } from "./policy-schema";
 
 declare module "cloudflare:workers" {
   interface Env {
@@ -36,6 +37,40 @@ export interface TestResult {
  * Generate test case source code from a policy schema.
  * Tests are driven by per-argument constraints and global rules.
  */
+/** Rust identifiers can't contain arbitrary schema text; keep names unique AND legal. */
+function ident(raw: string): string {
+  const cleaned = raw.replace(/[^A-Za-z0-9_]/g, "_");
+  return /^[0-9]/.test(cleaned) ? `_${cleaned}` : cleaned || "_";
+}
+
+/** A Symbol expression: symbol_short! only accepts <=9 chars. */
+function symbolExpr(name: string, envRef: string): string {
+  return name.length <= 9
+    ? `soroban_sdk::symbol_short!("${name}")`
+    : `soroban_sdk::Symbol::new(${envRef}, "${name}")`;
+}
+
+function addressExpr(address: string, envRef: string): string {
+  return address
+    ? `soroban_sdk::Address::from_string(&soroban_sdk::String::from_str(${envRef}, "${address}"))`
+    : `<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(${envRef})`;
+}
+
+/**
+ * Generate test case source code from a policy schema.
+ *
+ * Two invariants this generator exists to prove, beyond per-constraint checks:
+ *   1. DEFAULT-DENY — an unlisted function or contract is rejected. Without these, a policy
+ *      whose `enforce()` body is empty passes every other test in the suite.
+ *   2. AUTHORIZATION — enforce/install/uninstall actually require the smart account's auth.
+ *      Every other test runs under `mock_all_auths()`, which hides a missing require_auth().
+ *
+ * Negative tests call `try_<fn>` and assert `is_err()` rather than using bare
+ * `#[should_panic]`. A bare should_panic accepts ANY panic, including one thrown during
+ * setup (install, address decoding, arg conversion) — so a policy could pass a rejection
+ * test for entirely the wrong reason. With `try_`, setup panics still fail the test loudly
+ * and the assertion is specifically about the call under test.
+ */
 export function generateTestCases(schema: PolicySchema): string {
   const tests: string[] = [];
 
@@ -45,22 +80,57 @@ export function generateTestCases(schema: PolicySchema): string {
   const firstFuncArgs = firstFunc?.args ?? [];
 
   // For symbol_short!, function names must be ≤9 chars; use Symbol::new for longer names
-  const fnNameExpr = firstFunctionName.length <= 9
-    ? `soroban_sdk::symbol_short!("${firstFunctionName}")`
-    : `soroban_sdk::Symbol::new(env, "${firstFunctionName}")`;
+  const fnNameExpr = symbolExpr(firstFunctionName, "env");
 
-  const contractAddrExpr = contractAddress
-    ? `soroban_sdk::Address::from_string(&soroban_sdk::String::from_str(env, "${contractAddress}"))`
-    : `<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(env)`;
+  const contractAddrExpr = addressExpr(contractAddress, "env");
+
+  // A function name that cannot collide with anything the schema declares.
+  const knownFnNames = new Set(
+    schema.contracts.flatMap(c => c.functions.map(f => f.name))
+  );
+  let unknownFn = "zzunknown";
+  for (let i = 0; knownFnNames.has(unknownFn); i++) unknownFn = `zzunk${i}`;
+
+  // One fixture derived from the global rules, shared by every positive call and every
+  // positive control. Previously each of those hardcoded a single signer and never touched
+  // the ledger, so a CORRECT threshold or time-locked policy failed its own positive tests.
+  const requiredSigners = Math.max(
+    1,
+    ...schema.globalRules.map(r =>
+      r.type === "threshold" ? r.params.threshold
+        : r.type === "weighted_threshold" ? r.params.weights.length
+        : 1),
+  );
+
+  const timeLock = schema.globalRules.find(r => r.type === "time_lock");
+  const fixtureLedgerBody = timeLock && timeLock.type === "time_lock"
+    ? `    env.ledger().with_mut(|l| l.sequence_number = ${
+        // Pick a sequence strictly inside the declared window.
+        (() => {
+          const after = timeLock.params.validAfterLedger ?? 0;
+          const until = timeLock.params.validUntilLedger ?? after + 1000;
+          return Math.max(after, Math.min(until, after + 1));
+        })()
+      });`
+    : "    let _ = env; // no time lock in this schema";
 
   // Test preamble
   tests.push(`
 #[allow(unused_imports)]
 use soroban_sdk::testutils::Address as _;
+// Brings with_mut into scope for ledger manipulation in set_fixture_ledger().
+#[allow(unused_imports)]
+use soroban_sdk::testutils::Ledger as _;
 #[allow(unused_imports)]
 use soroban_sdk::auth::{Context, ContractContext};
 #[allow(unused_imports)]
 use soroban_sdk::{IntoVal, TryFromVal, FromVal};
+
+/// Signers required for a call to satisfy every global rule in the schema. Positive tests and
+/// the positive controls in negative tests must use this, not a hardcoded 1 — a correct
+/// threshold-N policy rejects a 1-signer call, which would fail the control and make every
+/// negative test unreachable.
+const REQUIRED_SIGNERS: u32 = ${requiredSigners};
 
 fn create_test_context_rule(env: &soroban_sdk::Env) -> ContextRule {
     let contract_addr = ${contractAddrExpr};
@@ -68,12 +138,27 @@ fn create_test_context_rule(env: &soroban_sdk::Env) -> ContextRule {
         id: 1,
         context_type: ContextRuleType::CallContract(contract_addr),
         name: soroban_sdk::String::from_str(env, "test-rule"),
-        signers: soroban_sdk::Vec::new(env),
+        // Must be non-empty and at least REQUIRED_SIGNERS long: policies validate
+        // threshold <= context_rule.signers.len() during install, so an empty signer list
+        // makes install itself fail with InvalidThreshold before enforcement is ever reached.
+        signers: create_test_signers(env, REQUIRED_SIGNERS),
         signer_ids: soroban_sdk::Vec::new(env),
         policies: soroban_sdk::Vec::new(env),
         policy_ids: soroban_sdk::Vec::new(env),
         valid_until: None,
     }
+}
+
+/// The signer set every positive call and every positive control uses.
+fn fixture_signers(env: &soroban_sdk::Env) -> soroban_sdk::Vec<Signer> {
+    create_test_signers(env, REQUIRED_SIGNERS)
+}
+
+/// Move the ledger inside any declared time-lock window. Without this the ledger stays at 0
+/// and a correct time-locked policy rejects every positive call, including the one named
+/// "within time window".
+fn set_fixture_ledger(env: &soroban_sdk::Env) {
+${fixtureLedgerBody}
 }
 
 fn create_test_params(env: &soroban_sdk::Env) -> soroban_sdk::Val {
@@ -101,7 +186,27 @@ fn create_function_context(env: &soroban_sdk::Env, args: soroban_sdk::Vec<soroba
         fn_name: ${fnNameExpr},
         args,
     })
-}`);
+}
+
+/// A contract address that appears nowhere in the schema. Enforcement must reject it.
+fn create_unknown_contract_context(env: &soroban_sdk::Env, args: soroban_sdk::Vec<soroban_sdk::Val>) -> Context {
+    Context::Contract(ContractContext {
+        contract: <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(env),
+        fn_name: ${fnNameExpr},
+        args,
+    })
+}
+
+/// A function name that appears nowhere in the schema. Enforcement must reject it.
+fn create_unknown_function_context(env: &soroban_sdk::Env, args: soroban_sdk::Vec<soroban_sdk::Val>) -> Context {
+    let contract_addr = ${contractAddrExpr};
+    Context::Contract(ContractContext {
+        contract: contract_addr,
+        fn_name: ${symbolExpr(unknownFn, "env")},
+        args,
+    })
+}
+${generatePerFunctionHelpers(schema)}`);
 
   // Basic lifecycle tests
   tests.push(`
@@ -109,6 +214,7 @@ fn create_function_context(env: &soroban_sdk::Env, args: soroban_sdk::Vec<soroba
 fn test_install_succeeds() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
@@ -121,6 +227,7 @@ fn test_install_succeeds() {
 fn test_uninstall_succeeds() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
@@ -136,6 +243,7 @@ fn test_uninstall_succeeds() {
 fn test_enforce_basic_succeeds() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
@@ -143,114 +251,216 @@ fn test_enforce_basic_succeeds() {
     client.install(&create_test_params(&env), &context_rule, &smart_account);
     let args = build_default_args(&env);
     let context = create_function_context(&env, args);
-    let signers = create_test_signers(&env, 1);
+    let signers = fixture_signers(&env);
     client.enforce(&context, &signers, &context_rule, &smart_account);
 }`);
 
+  // --- DEFAULT-DENY: the invariant that makes this suite a gate at all ---
+  // A policy whose enforce() is `{}` passes every positive test. These two are the only
+  // tests that a no-op enforcement cannot survive, so they are generated unconditionally
+  // for every schema regardless of which constraint kinds it happens to use.
+  tests.push(`
+#[test]
+fn test_enforce_rejects_unknown_function() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    // Positive control: the permitted call must succeed, so a failure below is
+    // attributable to the unknown function rather than to broken setup.
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    let context = create_unknown_function_context(&env, build_default_args(&env));
+    let signers = fixture_signers(&env);
+    assert!(
+        client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
+        "enforce() accepted a function name that is not in the policy schema — \\
+         an unlisted function must be rejected (default-deny)"
+    );
+}`);
+
+  tests.push(`
+#[test]
+fn test_enforce_rejects_unknown_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    let context = create_unknown_contract_context(&env, build_default_args(&env));
+    let signers = fixture_signers(&env);
+    assert!(
+        client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
+        "enforce() accepted a contract address that is not in the policy schema — \\
+         an unlisted contract must be rejected (default-deny)"
+    );
+}`);
+
+  // --- AUTHORIZATION ---
+  // Every other test runs under mock_all_auths(), which masks a missing require_auth().
+  // set_auths(&[]) removes all authorizations so the call must fail.
+  tests.push(`
+#[test]
+fn test_enforce_requires_smart_account_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+
+    let context = create_function_context(&env, build_default_args(&env));
+    let signers = fixture_signers(&env);
+    // Withdraw all authorization. smart_account.require_auth() must now fail.
+    env.set_auths(&[]);
+    assert!(
+        client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
+        "enforce() succeeded without the smart account's authorization — it must call \\
+         smart_account.require_auth()"
+    );
+}`);
+
+  tests.push(`
+#[test]
+fn test_enforce_before_install_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    // Deliberately no install().
+    let context = create_function_context(&env, build_default_args(&env));
+    let signers = fixture_signers(&env);
+    assert!(
+        client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
+        "enforce() succeeded for a smart account that never installed the policy"
+    );
+}`);
+
+  tests.push(`
+#[test]
+fn test_double_install_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    assert!(
+        client.try_install(&create_test_params(&env), &context_rule, &smart_account).is_err(),
+        "install() succeeded twice for the same (smart_account, context_rule) — the second \\
+         call must be rejected so configuration cannot be silently overwritten"
+    );
+}`);
+
   // Constraint-based tests per argument
-  for (const contract of schema.contracts) {
-    for (const func of contract.functions) {
+  for (const [contractIdx, contract] of schema.contracts.entries()) {
+    for (const [funcIdx, func] of contract.functions.entries()) {
       const argIndex = (arg: ArgPermission) => func.args.indexOf(arg);
+      // Each permission gets its OWN context. Previously every test reused
+      // contracts[0].functions[0], so a test for contract #2 sent contract #1's context and
+      // could "pass" because default-reject fired for entirely the wrong reason.
+      const ctxFn = `create_context_c${contractIdx}_f${funcIdx}`;
+      const argsFn = `build_args_c${contractIdx}_f${funcIdx}`;
+      const suffix = `c${contractIdx}_f${funcIdx}`;
 
       for (const arg of func.args) {
         if (!arg.constraint || arg.constraint.kind === "unconstrained") continue;
 
         switch (arg.constraint.kind) {
           case "exact": {
-            // Negative test: use a DIFFERENT value to prove the exact enforcement works.
-            // This makes exact constraints visible in test output and catches
-            // policies that silently pass when they should reject.
+            // Negative: a DIFFERENT value must be rejected. Every other argument is set to a
+            // constraint-SATISFYING value so the rejection is attributable to this one.
             const wrongValue = generateWrongValueForType(arg.type, arg.constraint.value);
             if (wrongValue) {
-              tests.push(`
-#[test]
-#[should_panic]
-fn test_enforce_${arg.name}_wrong_value() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register(PolicyContract, ());
-    let client = PolicyContractClient::new(&env, &contract_id);
-    let smart_account = Address::generate(&env);
-    let context_rule = create_test_context_rule(&env);
-    client.install(&create_test_params(&env), &context_rule, &smart_account);
-    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
-${generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: wrongValue }, useConstraintValues: true })}
-    let context = create_function_context(&env, args);
-    let signers = create_test_signers(&env, 1);
-    client.enforce(&context, &signers, &context_rule, &smart_account);
-}`);
+              tests.push(rejectionTest({
+                name: `test_enforce_${suffix}_${ident(arg.name)}_wrong_value`,
+                argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: wrongValue }, useConstraintValues: true }),
+                ctxFn, argsFn,
+                why: `enforce() accepted ${arg.name} with a value other than the required exact value`,
+              }));
             }
             break;
           }
 
-          case "range":
-            if (arg.constraint.max) {
-              // Build args with the specific constrained arg EXCEEDING the max
-              const exceedingValue = `${BigInt(arg.constraint.max) + 1n}`;
-              tests.push(`
-#[test]
-#[should_panic]
-fn test_enforce_${arg.name}_exceeds_range() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register(PolicyContract, ());
-    let client = PolicyContractClient::new(&env, &contract_id);
-    let smart_account = Address::generate(&env);
-    let context_rule = create_test_context_rule(&env);
-    client.install(&create_test_params(&env), &context_rule, &smart_account);
-    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
-${generateArgBuilderLines(func.args, "    ", "default", { overrideIndex: argIndex(arg), overrideValue: `${exceedingValue}${numericSuffix(arg.type)}` })}
-    let context = create_function_context(&env, args);
-    let signers = create_test_signers(&env, 1);
-    client.enforce(&context, &signers, &context_rule, &smart_account);
-}`);
+          case "range": {
+            // `!= null`: a bound of 0 is a real limit and needs its test. `outsideBound`
+            // returns null when the counterexample is not representable in the argument's
+            // type (u32 max, u32/u128 min of 0), in which case the test is skipped rather
+            // than emitting an out-of-range literal that breaks the whole crate.
+            const above = arg.constraint.max != null
+              ? outsideBound(arg.constraint.max, "above", arg.type) : null;
+            if (above) {
+              tests.push(rejectionTest({
+                name: `test_enforce_${suffix}_${ident(arg.name)}_exceeds_max`,
+                argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: above }, useConstraintValues: true }),
+                ctxFn, argsFn,
+                why: `enforce() accepted ${arg.name} above its declared maximum of ${arg.constraint.max}`,
+              }));
+            }
+            // Below-min was previously untested, so a one-sided implementation passed.
+            const below = arg.constraint.min != null
+              ? outsideBound(arg.constraint.min, "below", arg.type) : null;
+            if (below) {
+              tests.push(rejectionTest({
+                name: `test_enforce_${suffix}_${ident(arg.name)}_below_min`,
+                argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: below }, useConstraintValues: true }),
+                ctxFn, argsFn,
+                why: `enforce() accepted ${arg.name} below its declared minimum of ${arg.constraint.min}`,
+              }));
             }
             break;
+          }
 
           case "allowlist":
-            // Use a value that IS in the allowlist so enforce should succeed
             if (arg.constraint.values.length > 0) {
               const allowedValue = arg.constraint.values[0];
-              tests.push(`
-#[test]
-fn test_enforce_${arg.name}_allowed() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register(PolicyContract, ());
-    let client = PolicyContractClient::new(&env, &contract_id);
-    let smart_account = Address::generate(&env);
-    let context_rule = create_test_context_rule(&env);
-    client.install(&create_test_params(&env), &context_rule, &smart_account);
-    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
-${generateArgBuilderLines(func.args, "    ", "default", { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, allowedValue) })}
-    let context = create_function_context(&env, args);
-    let signers = create_test_signers(&env, 1);
-    client.enforce(&context, &signers, &context_rule, &smart_account);
-}`);
+              // Positive: a listed value passes.
+              tests.push(acceptanceTest({
+                name: `test_enforce_${suffix}_${ident(arg.name)}_allowed`,
+                argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, allowedValue) }, useConstraintValues: true }),
+                ctxFn, argsFn,
+              }));
+              // Negative: an UNLISTED value must be rejected. Without this a no-op enforce()
+              // passed every allowlist-only schema.
+              const notAllowed = generateWrongValueForType(arg.type, allowedValue);
+              if (notAllowed) {
+                tests.push(rejectionTest({
+                  name: `test_enforce_${suffix}_${ident(arg.name)}_not_allowlisted`,
+                  argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: notAllowed }, useConstraintValues: true }),
+                  ctxFn, argsFn,
+                  why: `enforce() accepted ${arg.name} with a value that is not on its allowlist`,
+                }));
+              }
             }
             break;
 
           case "blocklist":
-            // Use a value that IS in the blocklist so enforce should panic
             if (arg.constraint.values.length > 0) {
               const blockedValue = arg.constraint.values[0];
-              tests.push(`
-#[test]
-#[should_panic]
-fn test_enforce_${arg.name}_blocked() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register(PolicyContract, ());
-    let client = PolicyContractClient::new(&env, &contract_id);
-    let smart_account = Address::generate(&env);
-    let context_rule = create_test_context_rule(&env);
-    client.install(&create_test_params(&env), &context_rule, &smart_account);
-    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
-${generateArgBuilderLines(func.args, "    ", "default", { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, blockedValue) })}
-    let context = create_function_context(&env, args);
-    let signers = create_test_signers(&env, 1);
-    client.enforce(&context, &signers, &context_rule, &smart_account);
-}`);
+              tests.push(rejectionTest({
+                name: `test_enforce_${suffix}_${ident(arg.name)}_blocked`,
+                argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, blockedValue) }, useConstraintValues: true }),
+                ctxFn, argsFn,
+                why: `enforce() accepted ${arg.name} with a blocklisted value`,
+              }));
             }
             break;
         }
@@ -267,6 +477,7 @@ ${generateArgBuilderLines(func.args, "    ", "default", { overrideIndex: argInde
 fn test_enforce_with_enough_signers() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
@@ -284,6 +495,7 @@ fn test_enforce_with_enough_signers() {
 fn test_enforce_insufficient_signers() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
@@ -302,6 +514,7 @@ fn test_enforce_insufficient_signers() {
 fn test_enforce_within_time_window() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
@@ -309,7 +522,7 @@ fn test_enforce_within_time_window() {
     client.install(&create_test_params(&env), &context_rule, &smart_account);
     let args = build_default_args(&env);
     let context = create_function_context(&env, args);
-    let signers = create_test_signers(&env, 1);
+    let signers = fixture_signers(&env);
     client.enforce(&context, &signers, &context_rule, &smart_account);
 }`);
         break;
@@ -320,6 +533,7 @@ fn test_enforce_within_time_window() {
 fn test_enforce_weighted_threshold() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
@@ -336,18 +550,114 @@ fn test_enforce_weighted_threshold() {
 
   tests.push(`
 #[test]
-#[should_panic]
 fn test_uninstall_when_not_installed() {
     let env = Env::default();
     env.mock_all_auths();
+    set_fixture_ledger(&env);
     let contract_id = env.register(PolicyContract, ());
     let client = PolicyContractClient::new(&env, &contract_id);
     let smart_account = Address::generate(&env);
     let context_rule = create_test_context_rule(&env);
-    client.uninstall(&context_rule, &smart_account);
+    assert!(
+        client.try_uninstall(&context_rule, &smart_account).is_err(),
+        "uninstall() succeeded for a policy that was never installed"
+    );
 }`);
 
   return tests.join("\n");
+}
+
+// --- Test body builders ---
+
+interface TestBodyOpts {
+  name: string;
+  argLines: string;
+  ctxFn: string;
+  argsFn: string;
+  why?: string;
+}
+
+/**
+ * A negative test. Uses `try_enforce(...).is_err()` rather than `#[should_panic]`: a bare
+ * should_panic is satisfied by ANY panic, including one raised during install or argument
+ * conversion, so a policy could "pass" a rejection test without ever rejecting anything.
+ * The positive control first proves setup is sound.
+ */
+function rejectionTest({ name, argLines, ctxFn, argsFn, why }: TestBodyOpts): string {
+  return `
+#[test]
+fn ${name}() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    // Positive control: the compliant call must succeed, so the assertion below is
+    // attributable to the mutated argument and not to broken setup.
+    let ok_ctx = ${ctxFn}(&env, ${argsFn}(&env));
+    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
+${argLines}
+    let context = ${ctxFn}(&env, args);
+    let signers = fixture_signers(&env);
+    assert!(
+        client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
+        "${why ?? "enforce() accepted a value that violates the policy schema"}"
+    );
+}`;
+}
+
+/** A positive test: a compliant call must be accepted. */
+function acceptanceTest({ name, argLines, ctxFn, argsFn: _argsFn }: TestBodyOpts): string {
+  return `
+#[test]
+fn ${name}() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
+${argLines}
+    let context = ${ctxFn}(&env, args);
+    let signers = fixture_signers(&env);
+    client.enforce(&context, &signers, &context_rule, &smart_account);
+}`;
+}
+
+/**
+ * One context builder and one default-args builder per (contract, function). Sharing a single
+ * contracts[0].functions[0] context across every permission's tests meant a test nominally
+ * about contract #2 actually sent contract #1's context.
+ */
+function generatePerFunctionHelpers(schema: PolicySchema): string {
+  const out: string[] = [];
+  for (const [ci, contract] of schema.contracts.entries()) {
+    for (const [fi, func] of contract.functions.entries()) {
+      out.push(`
+fn build_args_c${ci}_f${fi}(env: &soroban_sdk::Env) -> soroban_sdk::Vec<soroban_sdk::Val> {
+    let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(env);
+${generateArgBuilderLines(func.args, "    ", "default", { useConstraintValues: true }).replace(/&env/g, "env")}
+    args
+}
+
+fn create_context_c${ci}_f${fi}(env: &soroban_sdk::Env, args: soroban_sdk::Vec<soroban_sdk::Val>) -> Context {
+    Context::Contract(ContractContext {
+        contract: ${addressExpr(contract.address, "env")},
+        fn_name: ${symbolExpr(func.name, "env")},
+        args,
+    })
+}`);
+    }
+  }
+  return out.join("\n");
 }
 
 // --- Arg builder helpers ---
@@ -457,6 +767,51 @@ function generateWrongValueForType(argType: string, exactValue: string): string 
   return null; // Can't generate a wrong value for complex types
 }
 
+/**
+ * A Rust numeric literal, parenthesised when negative.
+ *
+ * `-1i128.into_val(&env)` parses as `-(1i128.into_val(&env))` — method calls bind tighter than
+ * unary minus — which fails with `E0600: cannot apply unary operator - to type Val`. Verified
+ * against rustc. Any negative literal that will have a method called on it MUST be wrapped.
+ */
+function numLiteral(value: bigint, argType: string): string {
+  const lit = `${value}${numericSuffix(argType)}`;
+  return value < 0n ? `(${lit})` : lit;
+}
+
+/** Inclusive representable range of a Soroban numeric type, or null if not numeric. */
+function numericBounds(argType: string): { min: bigint; max: bigint } | null {
+  switch (argType.toLowerCase()) {
+    case "i128": return { min: -(2n ** 127n), max: 2n ** 127n - 1n };
+    case "u128": return { min: 0n, max: 2n ** 128n - 1n };
+    case "i64": return { min: -(2n ** 63n), max: 2n ** 63n - 1n };
+    case "u64": return { min: 0n, max: 2n ** 64n - 1n };
+    case "i32": return { min: -(2n ** 31n), max: 2n ** 31n - 1n };
+    case "u32": return { min: 0n, max: 2n ** 32n - 1n };
+    default: return null;
+  }
+}
+
+/**
+ * The counterexample just outside a bound, or null when it is not representable.
+ *
+ * A `u32` max of 4294967295 has no representable `max + 1`, and a `u32`/`u128` min of 0 has no
+ * representable `min - 1`. Emitting them anyway produced `error: literal out of range` and
+ * broke the whole crate, so those tests are skipped instead.
+ */
+function outsideBound(bound: string, dir: "above" | "below", argType: string): string | null {
+  const bounds = numericBounds(argType);
+  if (!bounds) return null;
+  let value: bigint;
+  try {
+    value = dir === "above" ? BigInt(bound) + 1n : BigInt(bound) - 1n;
+  } catch {
+    return null; // non-numeric bound in the schema
+  }
+  if (value > bounds.max || value < bounds.min) return null;
+  return numLiteral(value, argType);
+}
+
 /** Get the numeric suffix for a Rust numeric type. */
 function numericSuffix(argType: string): string {
   const t = argType.toLowerCase();
@@ -469,43 +824,19 @@ function numericSuffix(argType: string): string {
   return "i128"; // default to i128 for unknown numeric types
 }
 
+/**
+ * The install params the generated tests install with. Derived from the shared
+ * `installParamsSpec()` so the tests install exactly the keys the prompt declares and the
+ * deploy path sends. Drift here means a policy passes its tests and then fails its real
+ * on-chain install.
+ */
 function generateInstallParamsHelper(schema: PolicySchema): string {
-  // Build a generic install params map from constraints and notes
-  const parts: string[] = [];
-
-  for (const contract of schema.contracts) {
-    for (const func of contract.functions) {
-      for (const arg of func.args) {
-        if (!arg.constraint || arg.constraint.kind === "unconstrained") continue;
-
-        if (arg.constraint.kind === "range") {
-          if (arg.constraint.max) {
-            parts.push(`map.set(soroban_sdk::Symbol::new(env, "max_${arg.name}").into_val(env), ${arg.constraint.max}i128.into_val(env));`);
-          }
-          if (arg.constraint.min) {
-            parts.push(`map.set(soroban_sdk::Symbol::new(env, "min_${arg.name}").into_val(env), ${arg.constraint.min}i128.into_val(env));`);
-          }
-        }
-        if (arg.constraint.kind === "allowlist" && arg.constraint.values.length > 0) {
-          // Store first allowlisted address as a reference
-          parts.push(`map.set(soroban_sdk::Symbol::new(env, "allowed_${arg.name}").into_val(env), true.into_val(env));`);
-        }
-      }
-    }
-  }
-
-  // Check global rules
-  for (const rule of schema.globalRules) {
-    if (rule.type === "threshold") {
-      parts.push(`map.set(soroban_sdk::Symbol::new(env, "threshold").into_val(env), ${rule.params.threshold}u32.into_val(env));`);
-    }
-    if (rule.type === "time_lock") {
-      const after = rule.params.validAfterLedger ?? 0;
-      const until = rule.params.validUntilLedger ?? 999999999;
-      parts.push(`map.set(soroban_sdk::Symbol::new(env, "valid_after_ledger").into_val(env), ${after}u32.into_val(env));`);
-      parts.push(`map.set(soroban_sdk::Symbol::new(env, "valid_until_ledger").into_val(env), ${until}u32.into_val(env));`);
-    }
-  }
+  const parts = installParamsSpec(schema).map(p => {
+    const val = p.type === "i128" ? `${p.value}i128`
+      : p.type === "u32" ? `${p.value}u32`
+      : p.value === "true" ? "true" : "false";
+    return `map.set(soroban_sdk::Symbol::new(env, "${p.key}").into_val(env), ${val}.into_val(env));`;
+  });
 
   if (parts.length === 0) {
     return `soroban_sdk::Val::VOID.to_val()`;
@@ -520,7 +851,7 @@ function generateInstallParamsHelper(schema: PolicySchema): string {
 
 // --- Cargo.toml Template ---
 
-const CARGO_TOML_TEMPLATE = `\
+export const CARGO_TOML_TEMPLATE = `\
 [package]
 name = "policy-contract"
 version = "0.1.0"
@@ -550,24 +881,54 @@ lto = true
 
 interface SandboxInput {
   rustCode: string;
-  testCode?: string;
 }
 
 function validateSandboxInput(data: unknown): SandboxInput {
   if (typeof data !== "object" || data === null) {
     throw new Error("Invalid payload");
   }
-  const { rustCode, testCode } = data as { rustCode?: unknown; testCode?: unknown };
+  const { rustCode } = data as { rustCode?: unknown };
   if (typeof rustCode !== "string" || rustCode.length === 0) {
     throw new Error("rustCode is required");
   }
   if (rustCode.length > 100_000) {
     throw new Error("rustCode exceeds maximum size");
   }
-  if (testCode != null && typeof testCode !== "string") {
-    throw new Error("testCode must be a string");
+  return { rustCode };
+}
+
+interface TestInput {
+  rustCode: string;
+  schemaJson: string;
+}
+
+/**
+ * The test endpoint takes a SCHEMA, never test source.
+ *
+ * It previously accepted caller-supplied `testCode`, which made the whole suite advisory: any
+ * client could POST `testCode: ""` and get a run with zero tests. Server functions are
+ * ordinary HTTP endpoints, so no UI-side gate could close that. Generating the tests here,
+ * from a schema that must pass validateSchema() first, is what makes the suite a control
+ * rather than a suggestion.
+ */
+function validateTestInput(data: unknown): TestInput {
+  if (typeof data !== "object" || data === null) {
+    throw new Error("Invalid payload");
   }
-  return { rustCode, testCode: testCode as string | undefined };
+  const { rustCode, schemaJson } = data as { rustCode?: unknown; schemaJson?: unknown };
+  if (typeof rustCode !== "string" || rustCode.length === 0) {
+    throw new Error("rustCode is required");
+  }
+  if (rustCode.length > 100_000) {
+    throw new Error("rustCode exceeds maximum size");
+  }
+  if (typeof schemaJson !== "string" || schemaJson.length === 0) {
+    throw new Error("schemaJson is required");
+  }
+  if (schemaJson.length > 50_000) {
+    throw new Error("schemaJson exceeds maximum size");
+  }
+  return { rustCode, schemaJson };
 }
 
 export const compilePolicyCode = createServerFn({ method: "POST" })
@@ -639,9 +1000,31 @@ function errorChunk(message: string): TestStreamChunk {
  * there is.
  */
 export const streamPolicyTest = createServerFn({ method: "POST" })
-  .inputValidator(validateSandboxInput)
+  .inputValidator(validateTestInput)
   .handler(async function* ({ data }): AsyncGenerator<TestStreamChunk> {
-    const { rustCode, testCode } = data;
+    const { rustCode, schemaJson } = data;
+
+    // Tests are generated HERE, from a schema that must validate first. The caller cannot
+    // supply, weaken, or omit them.
+    const { schemaFromJSON, validateSchema } = await import("./policy-schema");
+    let testCode: string;
+    try {
+      const schema = schemaFromJSON(schemaJson);
+      const validation = validateSchema(schema);
+      if (!validation.valid) {
+        yield errorChunk(`Schema validation failed: ${validation.errors.join("; ")}`);
+        return;
+      }
+      testCode = generateTestCases(schema);
+    } catch (err: any) {
+      yield errorChunk(`Could not generate tests from schema: ${err?.message ?? "invalid schema"}`);
+      return;
+    }
+    if (!testCode.trim()) {
+      yield errorChunk("Test generation produced no tests; refusing to run an empty suite.");
+      return;
+    }
+
     const sandbox = env.SANDBOX;
     if (!sandbox) {
       yield errorChunk("Sandbox service not configured.");
@@ -653,7 +1036,7 @@ export const streamPolicyTest = createServerFn({ method: "POST" })
       response = await sandbox.fetch("https://sandbox/test/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cargoToml: CARGO_TOML_TEMPLATE, libRs: rustCode, testCode: testCode ?? "" }),
+        body: JSON.stringify({ cargoToml: CARGO_TOML_TEMPLATE, libRs: rustCode, testCode }),
       });
     } catch (err: any) {
       yield errorChunk(err.message || "Failed to reach sandbox service");
@@ -706,8 +1089,11 @@ export async function requestTest(
   schema: PolicySchema,
   onLog?: (line: string) => void,
 ): Promise<TestResult> {
-  const testCode = generateTestCases(schema);
-  const generator = await streamPolicyTest({ data: { rustCode, testCode } });
+  // Send the schema, not the tests. The server regenerates them so the suite cannot be
+  // weakened by a caller.
+  const generator = await streamPolicyTest({
+    data: { rustCode, schemaJson: schemaToJSON(schema) },
+  });
 
   let result: TestResult = {
     success: false,

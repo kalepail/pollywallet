@@ -198,12 +198,12 @@ describe("extractPatterns", () => {
 describe("summarizePattern", () => {
   it("should include arrow notation for execute patterns", () => {
     const pattern: TxPattern = {
-      contractAddress: "CABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOPQRSTU",
+      contractAddress: "CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U",
       functionName: "execute",
-      args: [{ type: "Address", value: "CTARGET" }],
-      signers: [{ type: "External", identity: "GABCDEF" }],
+      args: [{ type: "Address", value: "CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U" }],
+      signers: [{ type: "External", identity: "GABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQHGPC" }],
       innerCall: {
-        targetContract: "CTARGETCONTRACTADDRESSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        targetContract: "CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U",
         functionName: "transfer",
         args: [],
       },
@@ -217,7 +217,7 @@ describe("summarizePattern", () => {
 
   it("should show args summary without arrow when no innerCall", () => {
     const pattern: TxPattern = {
-      contractAddress: "CABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOPQRSTU",
+      contractAddress: "CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U",
       functionName: "transfer",
       args: [
         { type: "Address", value: "GFROM" },

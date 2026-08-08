@@ -206,7 +206,7 @@ Define a JSON schema that deterministically describes a policy contract. This sc
 ## Phase 3 — AI Code Generation (Cloudflare Worker)
 
 ### Goal
-Send the deterministic schema to a Cloudflare Worker that uses Workers AI Kimi K2.5 (`@cf/moonshotai/kimi-k2.5`, 256k context) to generate a complete Rust/Soroban policy contract.
+Send the deterministic schema to a Cloudflare Worker that uses Workers AI Kimi K2.7 Code (`@cf/moonshotai/kimi-k2.7-code`, 262k context) to generate a complete Rust/Soroban policy contract.
 
 ### Prompt Engineering Strategy
 
@@ -254,7 +254,7 @@ Generate ONLY the Rust source code. No markdown, no explanations.
 2. **Cloudflare Worker endpoint** — `/api/policy/generate`
    - Receives schema JSON
    - Constructs prompt from schema + embedded reference code
-   - Calls `env.AI.run("@cf/moonshotai/kimi-k2.5", { messages, stream: true })`
+   - Calls `env.AI.run("@cf/moonshotai/kimi-k2.7-code", { messages, stream: true, max_tokens, stream_options }, { extraHeaders })`
    - Uses `x-session-affinity` for prompt caching across iterative refinements
    - Returns streamed Rust source code via SSE
    - For batch/non-realtime: use `queueRequest: true` async API
@@ -476,15 +476,15 @@ src/
 
 ## Resolved Decisions
 
-### 1. AI Model — Kimi K2.5 via Workers AI
+### 1. AI Model — Kimi K2.7 Code via Workers AI
 
-- **Model ID**: `@cf/moonshotai/kimi-k2.5`
-- **Context window**: 256,000 tokens (plenty for full Policy trait + reference impls + schema)
+- **Model ID**: `@cf/moonshotai/kimi-k2.7-code`
+- **Context window**: 262,144 tokens, shared with output (plenty for full Policy trait + reference impls + schema)
 - **Capabilities**: Reasoning, function calling, streaming, structured outputs
 - **Pricing**: $0.60/M input tokens, $0.10/M cached input, $3.00/M output tokens
 - **Prompt caching**: Use `x-session-affinity` header for multi-turn conversations
 - **Async batch**: `queueRequest: true` for non-realtime jobs (code gen can use this)
-- **Access**: `env.AI.run("@cf/moonshotai/kimi-k2.5", { messages, stream: true })`
+- **Access**: `env.AI.run("@cf/moonshotai/kimi-k2.7-code", { messages, stream: true })`
 
 ### 2. Sandbox — Cloudflare Sandbox SDK with Custom Dockerfile
 

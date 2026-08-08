@@ -23,15 +23,30 @@ When working on this project, **always use MCP tools and parallel-cli for resear
 
 The policy builder feature uses several Cloudflare services together:
 
-### Workers AI — Kimi K2.5
+### Workers AI — Kimi K2.7 Code
 
-- Model ID: `@cf/moonshotai/kimi-k2.5`
-- 256k token context window
-- Supports: streaming, reasoning, function calling, vision, batch
-- Pricing: $0.60/M input, $0.10/M cached input, $3.00/M output
-- Use `x-session-affinity` header for prompt caching in multi-turn
-- Async batch API available via `queueRequest: true` for non-realtime workloads
-- Access via: `env.AI.run()` binding, REST API, or OpenAI-compatible endpoint
+Verified against the live model catalog and endpoint 2026-08-07. The previous version of this
+section described `kimi-k2.5` and was wrong on five counts (model, prices, batch support,
+caching mechanism, and the fact that k2.5 has been auto-aliased to k2.6 since 2026-05-30).
+
+- Model ID: `@cf/moonshotai/kimi-k2.7-code` (see `src/lib/constants.ts`)
+- 262,144-token context window; same figure is the max output, shared with the prompt
+- Pricing: $0.95/M input, $0.19/M cached input, $4.00/M output
+- Supports streaming and reasoning. **No batch API** on this model — `queueRequest: true`
+  is not available (k2.6 has `async_queue`; k2.7-code does not)
+- **Prompt caching is automatic**, no header needed — measured 99-100% hit rate, 64-token
+  blocks. `x-session-affinity` only improves routing to a warm instance; pass it as a
+  **constant** so all traffic shares the one cached system-prompt prefix
+- **Reasoning cannot be disabled or throttled.** Reasoning shares `max_tokens` with the code
+  and is 70-87% of every completion. Do not pass `chat_template_kwargs` or `reasoning_effort`
+  — see the comment at the `ai.run()` call sites for the measured failure modes
+- **Use `stream: true`.** Non-streaming requests time out (CF error 3046) at large budgets
+- Rate limit: 20 rpm per account/model (50 with AI Gateway credits)
+- Access via: `env.AI.run()` binding, REST API, or OpenAI-compatible endpoint. The binding can
+  set headers: `env.AI.run(model, inputs, { extraHeaders })`
+
+For the full authoring and tuning rationale see
+`.claude/skills/soroban-policy-authoring/SKILL.md`.
 
 ### Cloudflare Sandbox — Policy Testing
 

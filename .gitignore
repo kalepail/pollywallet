@@ -16,7 +16,11 @@ todos.json
 !.dev.vars.example
 !.env.example
 
-.claude/
+# `.claude/*` not `.claude/` — git never descends into an ignored directory, so a negation
+# inside one has no effect. Skills are shared project documentation (AGENTS.md links to them),
+# while settings/projects are local machine state.
+.claude/*
+!.claude/skills/
 solo.yml
 e2e-policy-test/target/
 e2e-policy-test/test_snapshots/
