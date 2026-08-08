@@ -926,6 +926,154 @@ type PromptCacheUsage = { promptTokens: number; cachedTokens: number };
  * Streaming server function using async generator.
  * Yields GenerateChunks as tokens arrive from Workers AI.
  */
+/** How many tool-calling rounds the research phase may take before it must conclude. */
+export const RAVEN_RESEARCH_MAX_ROUNDS = 6;
+/** Output budget per research round. Small: the model is calling tools, not writing a contract. */
+export const RAVEN_RESEARCH_TOKEN_BUDGET = 4_096;
+
+export function buildResearchPrompt(schema: PolicySchema): string {
+  const targets = schema.contracts
+    .map((c) => `- ${c.address}${c.decimals != null ? ` (decimals() = ${c.decimals})` : ""}: ${
+      c.functions.map((f) => `${f.name}(${f.args.map((a) => `${a.name}: ${a.type}`).join(", ")})`).join("; ")
+    }`)
+    .join("\n");
+
+  return `Before this policy is written, verify the Stellar facts it will depend on. You have
+two tools onto Stellar's official documentation and live services; use them as many times as
+you need, and prefer one stellar_execute script composing several operations over many
+separate searches.
+
+The policy will constrain these contract calls:
+${targets || "(no contracts listed)"}
+
+Confirm the things that are easy to get wrong and impossible to see in a diff:
+- Denominations. Which arguments are in base units rather than whole tokens, and what the
+  target's decimals actually are. Do not assume 7.
+- Clocks. Whether any bound is a ledger sequence or a unix timestamp, and which accessor
+  reads it.
+- Semantics of the specific functions being constrained — argument order and meaning, error
+  conditions, anything a naive reading would get backwards.
+
+When you have checked what matters, reply with a short plain-text list of the confirmed facts
+and nothing else. No code, no preamble. If a check found nothing surprising, say so in one
+line rather than padding.`;
+}
+
+type ResearchStep = { type: "note" | "facts"; text: string };
+
+/**
+ * Run the model with Raven's tools bound until it stops asking for them, then hand back what
+ * it concluded. Deliberately uncapped in spirit — Raven is free to call — but bounded by
+ * RAVEN_RESEARCH_MAX_ROUNDS so a model that loops forever cannot hang a generation.
+ */
+export async function* researchWithRaven(
+  ai: any,
+  apiKey: string,
+  schema: PolicySchema
+): AsyncGenerator<ResearchStep> {
+  const { RavenClient, RAVEN_TOOL_DEFINITIONS } = await import("./raven-mcp");
+  const raven = new RavenClient(apiKey);
+
+  const messages: any[] = [
+    {
+      role: "system",
+      content:
+        "You are verifying Stellar protocol facts for a Soroban policy contract. Use the " +
+        "tools to check anything you would otherwise assume. Be skeptical of what feels " +
+        "obvious — denominations and clock units are the usual source of silent, expensive " +
+        "errors. Finish with a terse list of confirmed facts.",
+    },
+    { role: "user", content: buildResearchPrompt(schema) },
+  ];
+
+  yield { type: "note", text: "\n[verifying assumptions against Stellar Raven…]\n" };
+
+  for (let round = 0; round < RAVEN_RESEARCH_MAX_ROUNDS; round++) {
+    const response: any = await ai.run(
+      POLICY_CODEGEN_MODEL,
+      {
+        messages,
+        tools: RAVEN_TOOL_DEFINITIONS,
+        max_tokens: RAVEN_RESEARCH_TOKEN_BUDGET,
+        temperature: 0.1,
+      },
+      { extraHeaders: { "x-session-affinity": POLICY_CODEGEN_AFFINITY } }
+    );
+
+    const toolCalls = extractToolCalls(response);
+    if (toolCalls.length === 0) {
+      const facts = extractResponseText(response);
+      if (facts) {
+        yield { type: "note", text: `[verified]\n${facts}\n` };
+        yield {
+          type: "facts",
+          text:
+            "VERIFIED FACTS (confirmed against Stellar's official documentation and live " +
+            `services before generation — treat these as authoritative):\n${facts}`,
+        };
+      }
+      return;
+    }
+
+    messages.push({ role: "assistant", content: "", tool_calls: toolCalls });
+    for (const call of toolCalls) {
+      const name = call.function?.name ?? call.name;
+      const rawArgs = call.function?.arguments ?? call.arguments ?? {};
+      const args = typeof rawArgs === "string" ? safeJsonParse(rawArgs) : rawArgs;
+      yield { type: "note", text: `[raven] ${name} ${JSON.stringify(args).slice(0, 120)}\n` };
+      const result = await raven.callTool(name, args);
+      messages.push({
+        role: "tool",
+        name,
+        tool_call_id: call.id ?? name,
+        content: result,
+      });
+    }
+  }
+
+  yield {
+    type: "note",
+    text: `[research stopped after ${RAVEN_RESEARCH_MAX_ROUNDS} rounds]\n`,
+  };
+}
+
+/**
+ * Workers AI returns tool calls under a few shapes. Measured against the live endpoint
+ * 2026-08-08, K2.7 Code answers in the OpenAI shape — `choices[0].message.tool_calls`, with
+ * `finish_reason: "tool_calls"` — while other models and the binding have used a flat
+ * `tool_calls`. Accept all of them rather than pinning one and silently never researching.
+ */
+export function extractToolCalls(response: any): any[] {
+  const candidates = [
+    response?.tool_calls,
+    response?.result?.tool_calls,
+    response?.choices?.[0]?.message?.tool_calls,
+    response?.result?.choices?.[0]?.message?.tool_calls,
+  ];
+  for (const c of candidates) if (Array.isArray(c) && c.length > 0) return c;
+  return [];
+}
+
+/** Final assistant text, across the same set of response shapes. */
+export function extractResponseText(response: any): string {
+  const candidates = [
+    response?.response,
+    response?.result?.response,
+    response?.choices?.[0]?.message?.content,
+    response?.result?.choices?.[0]?.message?.content,
+  ];
+  for (const c of candidates) if (typeof c === "string" && c.trim()) return c.trim();
+  return "";
+}
+
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
+}
+
 export const streamPolicyCode = createServerFn({ method: "POST" })
   .inputValidator(validateGenerateInput)
   .handler(async function* ({ data }): AsyncGenerator<GenerateChunk> {
@@ -940,12 +1088,35 @@ export const streamPolicyCode = createServerFn({ method: "POST" })
     }
 
     const systemPrompt = buildSystemPrompt();
-    const userPrompt = buildUserPrompt(schema);
+    let userPrompt = buildUserPrompt(schema);
 
     const ai = env.AI;
     if (!ai) {
       yield { type: "error", text: "Workers AI binding not available." };
       return;
+    }
+
+    // Research phase: let the model check its own Stellar assumptions against Raven before it
+    // writes a line of Rust. Kept SEPARATE from the streaming generation below rather than
+    // enabling tools on it, because that stream's split between `delta.content` (Rust) and
+    // `delta.reasoning_content` (thinking) is load-bearing and interleaving tool_calls into it
+    // risks poisoning codeBuffer. Research is cheap, bounded, and strictly additive: whatever
+    // it finds is appended to the user prompt as verified facts.
+    const ravenKey = (env as any).RAVEN_API_KEY as string | undefined;
+    if (ravenKey) {
+      try {
+        for await (const step of researchWithRaven(ai, ravenKey, schema)) {
+          if (step.type === "note") {
+            yield { type: "reasoning", text: step.text };
+          } else {
+            userPrompt = `${userPrompt}\n\n${step.text}`;
+          }
+        }
+      } catch (err: any) {
+        // A research failure must never block codegen — the prompt already carries the
+        // settled facts, and this phase only adds schema-specific confirmations on top.
+        yield { type: "reasoning", text: `\n[research skipped: ${err?.message ?? String(err)}]\n` };
+      }
     }
 
     let tokenCount = 0;
