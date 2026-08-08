@@ -5,6 +5,7 @@ import {
   Plus,
   PaperPlaneTilt,
   Coins,
+  SignIn,
   SignOut,
   Copy,
   Check,
@@ -72,7 +73,7 @@ function App() {
     tokenCode, tokens,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setTokenCode, setSelectedRuleId,
-    handleCreate, handleFund, handleFundUsdc, handleTransfer, handleDisconnect, handleCopy,
+    handleCreate, handleSignIn, handleFund, handleFundUsdc, handleTransfer, handleDisconnect, handleCopy,
   } = useWallet();
 
   if (!wallet) {
@@ -91,6 +92,14 @@ function App() {
           >
             {loading ? <Loader size={20} /> : <Plus size={20} weight="bold" />}
             Create Smart Wallet
+          </button>
+          <button
+            onClick={handleSignIn}
+            disabled={loading}
+            className="mt-3 w-full flex items-center justify-center gap-3 px-6 py-4 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-300 font-semibold rounded-xl transition-colors"
+          >
+            {loading ? <Loader size={20} /> : <SignIn size={20} weight="bold" />}
+            Sign In with Passkey
           </button>
           <div className="mt-4">
             <StatusPanel status={status} kind={statusKind} txHash={lastTxHash} />

@@ -98,7 +98,11 @@ export async function createPasskey(
     },
     authenticatorSelection: {
       residentKey: "preferred",
-      userVerification: "preferred",
+      // Not a preference — the on-chain verifier panics with VerifiedBitNotSet unless the UV
+      // flag is set (validate_user_verified_bit_set, accounts/src/verifiers/webauthn.rs).
+      // "preferred" lets an authenticator return UV=0, which still registers and still signs
+      // in, then fails EVERY transaction. Ask for it up front so the failure is at creation.
+      userVerification: "required",
     },
     pubKeyCredParams: [{ alg: -7, type: "public-key" }],
     timeout: WEBAUTHN_TIMEOUT_MS,
@@ -108,6 +112,51 @@ export async function createPasskey(
   const publicKey = await extractPublicKey(response.response);
 
   return { credentialId: response.id, publicKey };
+}
+
+/**
+ * Prompt for an existing passkey and return its credential id.
+ *
+ * No `allowCredentials` — after localStorage is cleared the app has nothing to hint with, so
+ * the browser offers whatever discoverable credentials it holds for this origin. Nothing here
+ * is verified: the credential id alone determines the wallet (it is the contract-id salt), and
+ * the passkey only proves itself later when it signs a real transaction.
+ */
+export async function authenticatePasskey(): Promise<string> {
+  const challenge = base64url(Buffer.from(crypto.getRandomValues(new Uint8Array(32))));
+  const response = await startAuthentication({
+    optionsJSON: {
+      challenge,
+      userVerification: "required",
+      timeout: WEBAUTHN_TIMEOUT_MS,
+    },
+  });
+  return response.id;
+}
+
+/**
+ * Recover a passkey's secp256r1 public key from a deployed wallet's on-chain signers.
+ *
+ * Sign-in gets the credential id back from WebAuthn but never the public key — only
+ * registration exposes that. The wallet contract has it though: `buildKeyData` stored
+ * publicKey(65) ++ credentialId as the External signer's key data, so the matching signer
+ * hands the key back. Returns null when this wallet has no signer for that credential.
+ */
+export function findSignerPublicKey(
+  signers: Array<{ type: string; address: string; keyData?: Uint8Array }>,
+  credentialId: Uint8Array
+): Uint8Array | null {
+  // Both sides go through Buffer.from so `.equals` never sees a foreign Buffer class — under
+  // Node this module's polyfill Buffer and base64url's native one are not the same class.
+  const wanted = Buffer.from(credentialId);
+  for (const s of signers) {
+    if (s.type !== "External" || s.address !== TESTNET_WEBAUTHN_VERIFIER || !s.keyData) continue;
+    const keyData = Buffer.from(s.keyData);
+    if (keyData.length !== SECP256R1_PUBLIC_KEY_SIZE + wanted.length) continue;
+    if (!keyData.subarray(SECP256R1_PUBLIC_KEY_SIZE).equals(wanted)) continue;
+    return new Uint8Array(keyData.subarray(0, SECP256R1_PUBLIC_KEY_SIZE));
+  }
+  return null;
 }
 
 export async function signWithPasskey(
@@ -120,7 +169,7 @@ export async function signWithPasskey(
 }> {
   const authOptions: PublicKeyCredentialRequestOptionsJSON = {
     challenge: base64url(challenge),
-    userVerification: "preferred",
+    userVerification: "required",
     timeout: WEBAUTHN_TIMEOUT_MS,
     allowCredentials: [{ id: credentialId, type: "public-key" }],
   };
@@ -333,7 +382,9 @@ export async function signWalletAuthEntries(params: {
 // --- Key Data / Contract Address ---
 
 export function buildKeyData(publicKey: Uint8Array, credentialId: string): Buffer {
-  return Buffer.concat([Buffer.from(publicKey), base64url.toBuffer(credentialId)]);
+  // base64url returns a native Buffer under Node, which this module's polyfill Buffer.concat
+  // rejects as a foreign class. Buffer.from normalises it; in the browser both are the polyfill.
+  return Buffer.concat([Buffer.from(publicKey), Buffer.from(base64url.toBuffer(credentialId))]);
 }
 
 export function deriveContractAddress(

@@ -18,6 +18,8 @@ import { signAndSubmitDeploy } from "../lib/relayer";
 import { requestSubmitToRelayer } from "../lib/policy-deploy";
 import {
   createPasskey,
+  authenticatePasskey,
+  findSignerPublicKey,
   signWithPasskey,
   buildKeyData,
   buildSignaturePayload,
@@ -217,6 +219,87 @@ export function useWallet() {
       setStatusKind("done");
     } catch (err: any) {
       console.error("Create wallet error:", err);
+      setStatus(err.message || "Something went wrong");
+      setStatusKind("error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
+   * Sign in to an existing wallet on a device that has the passkey but not the localStorage
+   * entry — a second browser, a cleared cache, or after Disconnect.
+   *
+   * Nothing has to be deployed or looked up to find the wallet: the contract id is a pure
+   * function of the credential id (it is the salt), so deriving it is offline. The lookup is
+   * only to recover the public key, which WebAuthn does not return on authentication.
+   */
+  const handleSignIn = async () => {
+    setLoading(true);
+    setStatus("Sign in with your passkey...");
+    setStatusKind("busy");
+    setLastTxHash(null);
+
+    try {
+      const credentialId = await authenticatePasskey();
+      const credIdBuf = base64url.toBuffer(credentialId);
+      const contractId = deriveContractAddress(
+        credIdBuf, DEPLOYER_PUBLIC_KEY, TESTNET_NETWORK_PASSPHRASE
+      );
+
+      setStatus("Looking up your wallet...");
+      const rulesResult = await requestContextRules(contractId);
+      if (!rulesResult.success) {
+        // requestContextRules collapses every failure into success:false, so a flaky RPC looks
+        // identical to a wallet that was never deployed. Only the latter should suggest
+        // creating one — telling a user with a temporary network fault to "create instead"
+        // mints a second wallet and strands the funds in the first.
+        throw new Error(
+          rulesResult.error?.includes("MissingValue")
+            ? "No wallet found for that passkey — create one instead."
+            : "Couldn't reach the network to load your wallet — try again."
+        );
+      }
+
+      // Sign-in trusts whatever the contract at this address reports as its signers, so
+      // confirm it IS a wallet before believing any of it. The deployer key is publicly
+      // derivable (see relayer.ts), so anyone can deploy arbitrary WASM at a derived address —
+      // after a testnet reset, someone holding an old credential id could squat the address
+      // with an ABI-compatible impostor reporting plausible signers, and quietly receive
+      // anything sent to it. Runs after the lookup so a missing contract still gets the
+      // clearer error above; nothing from the rules is used until this passes.
+      const executable = (await server.getContractInstance(contractId)).executable();
+      if (
+        executable.switch().name !== "contractExecutableWasm" ||
+        Buffer.from(executable.wasmHash()).toString("hex") !== TESTNET_ACCOUNT_WASM_HASH
+      ) {
+        throw new Error("The contract at that address is not a PollyWallet smart account.");
+      }
+
+      // Find the RULE the passkey signs under, not just the key. Signing sends
+      // context_rule_ids alongside the signature, so a passkey that lives on rule 7 (rule 0
+      // deleted, signer moved) would sign in fine and then have every transfer rejected for
+      // presenting rule 0 — which selectedRuleId otherwise defaults to.
+      const match = rulesResult.rules
+        .map((rule) => ({ rule, publicKey: findSignerPublicKey(rule.signers, credIdBuf) }))
+        .find((m) => m.publicKey !== null);
+      if (!match?.publicKey) {
+        throw new Error("That passkey is no longer a signer on its wallet.");
+      }
+      const publicKey = match.publicKey;
+
+      const walletData: StoredWallet = {
+        credentialId,
+        contractId,
+        publicKey: Buffer.from(publicKey).toString("hex"),
+      };
+      saveWallet(walletData);
+      setWallet(walletData);
+      setContextRules(rulesResult.rules);
+      setSelectedRuleId(match.rule.id);
+      setStatus("Signed in!");
+      setStatusKind("done");
+    } catch (err: any) {
       setStatus(err.message || "Something went wrong");
       setStatusKind("error");
     } finally {
@@ -617,6 +700,12 @@ export function useWallet() {
     setStatus("");
     setStatusKind("idle");
     setLastTxHash(null);
+    // Rule ids are per-wallet, and this is the only way to reach a different wallet. Left
+    // stale, a rule id picked on the previous wallet is signed into the next wallet's auth
+    // digest as context_rule_ids — the rule selector only renders for wallets that HAVE
+    // policy rules, so on one that doesn't the plain Send button silently fails __check_auth.
+    setContextRules([]);
+    setSelectedRuleId(0);
   };
 
   const handleCopy = () => {
@@ -632,7 +721,7 @@ export function useWallet() {
     tokenCode, tokens: TESTNET_TOKENS,
     contextRules, selectedRuleId, rulesLoading,
     setDestination, setAmount, setTokenCode, setSelectedRuleId,
-    handleCreate, handleFund, handleFundUsdc, handleTransfer, handleDisconnect, handleCopy,
+    handleCreate, handleSignIn, handleFund, handleFundUsdc, handleTransfer, handleDisconnect, handleCopy,
     fetchRules,
   };
 }

@@ -41,6 +41,11 @@ import {
   parseXlmToStroops,
   saveWallet,
   signWithPasskey,
+  authenticatePasskey,
+  buildKeyData,
+  findSignerPublicKey,
+  TESTNET_WEBAUTHN_VERIFIER,
+  TESTNET_ED25519_VERIFIER,
   toI128,
   type StoredWallet,
 } from "../passkey";
@@ -203,5 +208,102 @@ describe("deployer identity is shared and stable", () => {
 
   it("pins the deployer address, because wallet addresses derive from it", () => {
     expect(DEPLOYER_PUBLIC_KEY).toBe("GDWAZVMP6766SAM2HRO6W2QIANU64KUTINIDC5ZQWRS5NAX25CZOHIQV");
+  });
+});
+
+// Sign-in gets the credential id back from WebAuthn but never the public key, so it has to
+// come from the wallet's on-chain signers. Picking the wrong signer would store a key that
+// cannot sign, and every later transaction would fail at __check_auth instead of here.
+describe("passkey sign-in", () => {
+  const keyDataFor = (publicKey: Buffer, credentialId: Buffer) =>
+    buildKeyData(publicKey, base64url(credentialId));
+
+  const credentialId = Buffer.alloc(32, 3);
+  const publicKey = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]);
+  const signer = {
+    type: "External",
+    address: TESTNET_WEBAUTHN_VERIFIER,
+    keyData: new Uint8Array(keyDataFor(publicKey, credentialId)),
+  };
+
+  it("offers every discoverable credential rather than hinting at one", async () => {
+    webauthn.authenticate.mockResolvedValue({ id: "recovered-credential" });
+
+    await expect(authenticatePasskey()).resolves.toBe("recovered-credential");
+
+    const { optionsJSON } = webauthn.authenticate.mock.calls[0][0];
+    expect(optionsJSON).not.toHaveProperty("allowCredentials");
+    expect(optionsJSON.challenge).toEqual(expect.any(String));
+  });
+
+  // The verifier panics with VerifiedBitNotSet unless the UV flag is set, so anything less
+  // than "required" mints wallets that sign in and then fail every transaction on-chain.
+  // See validate_user_verified_bit_set in accounts/src/verifiers/webauthn.rs.
+  it("demands user verification in every ceremony", async () => {
+    webauthn.register.mockResolvedValue({
+      id: "credential-id",
+      response: { publicKey: base64url(Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)])) },
+    });
+    webauthn.authenticate.mockResolvedValue({
+      id: "credential-id",
+      response: {
+        signature: base64url(Buffer.from([0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01])),
+        authenticatorData: base64url(Buffer.from([1])),
+        clientDataJSON: base64url(Buffer.from("{}")),
+      },
+    });
+
+    await createPasskey("Polly", "user");
+    await authenticatePasskey();
+    await signWithPasskey("credential-id", Buffer.from([1]));
+
+    expect(webauthn.register.mock.calls[0][0].optionsJSON.authenticatorSelection)
+      .toMatchObject({ userVerification: "required" });
+    for (const call of webauthn.authenticate.mock.calls) {
+      expect(call[0].optionsJSON.userVerification).toBe("required");
+    }
+  });
+
+  it("recovers the public key from the signer holding this credential", () => {
+    expect(findSignerPublicKey([signer], credentialId)).toEqual(new Uint8Array(publicKey));
+  });
+
+  it("skips signers for other credentials, verifiers, and signer types", () => {
+    const otherCredential = Buffer.alloc(32, 4);
+    expect(findSignerPublicKey([signer], otherCredential)).toBeNull();
+    expect(
+      findSignerPublicKey([{ ...signer, address: TESTNET_ED25519_VERIFIER }], credentialId)
+    ).toBeNull();
+    expect(findSignerPublicKey([{ ...signer, type: "Delegated" }], credentialId)).toBeNull();
+    expect(findSignerPublicKey([{ ...signer, keyData: undefined }], credentialId)).toBeNull();
+  });
+
+  // A same-prefix credential id would pass a naive startsWith/includes check and hand back a
+  // key belonging to a different passkey.
+  it("rejects a signer whose credential id merely shares a prefix", () => {
+    const longer = Buffer.concat([credentialId, Buffer.from([9])]);
+    const longerSigner = { ...signer, keyData: new Uint8Array(keyDataFor(publicKey, longer)) };
+    expect(findSignerPublicKey([longerSigner], credentialId)).toBeNull();
+    expect(findSignerPublicKey([signer], longer)).toBeNull();
+  });
+
+  // Without the length check the tail compare alone accepts an empty credential id against
+  // ANY key data — subarray(65) of a 40-byte buffer is empty too — and hands back a 40-byte
+  // "public key". Mutation-tested: deleting the length check fails only this case.
+  it("rejects key data too short to hold a P-256 key", () => {
+    const stunted = { ...signer, keyData: new Uint8Array(40) };
+    expect(findSignerPublicKey([stunted], Buffer.alloc(0))).toBeNull();
+    expect(findSignerPublicKey([signer], Buffer.alloc(0))).toBeNull();
+  });
+
+  it("finds the right signer among several on the wallet", () => {
+    const decoy = {
+      type: "External",
+      address: TESTNET_WEBAUTHN_VERIFIER,
+      keyData: new Uint8Array(
+        keyDataFor(Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 1)]), Buffer.alloc(32, 5))
+      ),
+    };
+    expect(findSignerPublicKey([decoy, signer], credentialId)).toEqual(new Uint8Array(publicKey));
   });
 });
