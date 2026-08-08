@@ -321,3 +321,44 @@ describe("stale client bundles get an actionable error", () => {
     ).rejects.toThrow(/out of date — reload/);
   });
 });
+
+// The generated suite is the gate that let the units bug through. A max-only range fell to
+// the 0i128 default, so every acceptance test sent amount = 0 — a value ANY policy accepts,
+// including one that divided the cap by 10^7 and then rejected every real transfer. Found by
+// an adversarial reviewer reading the harness rather than the policy.
+describe("acceptance tests exercise a real in-range value", () => {
+  const schemaWith = (constraint: any): any => ({
+    $schema: "pollywallet-policy/v0",
+    name: "cap",
+    description: "cap fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      decimals: 7,
+      functions: [{ name: "transfer", args: [
+        { name: "from", type: "address" },
+        { name: "to", type: "address" },
+        { name: "amount", type: "i128", constraint },
+      ] }],
+    }],
+  });
+
+  it("uses the max as the positive value, never 0", () => {
+    const rust = generateTestCases(schemaWith({ kind: "range", max: "1000000000" }));
+    expect(rust).toContain("1000000000i128");
+    // The tell-tale of the old behaviour: amount defaulting to zero.
+    // Anchored so it cannot match the tail of a legitimate value like 1000000000i128.
+    expect(rust).not.toMatch(/(?<![0-9])0i128\.into_val\(&?env\)\); \/\/ amount/);
+  });
+
+  it("falls back to the min when only a min is set", () => {
+    const rust = generateTestCases(schemaWith({ kind: "range", min: "500" }));
+    expect(rust).toContain("500i128");
+  });
+
+  it("still emits a valid literal for a negative bound", () => {
+    const rust = generateTestCases(schemaWith({ kind: "range", max: "-1" }));
+    // Must be parenthesised: -1i128 parses as -(1i128.into_val(..)) and fails to compile.
+    expect(rust).toMatch(/\(-1i128\)/);
+  });
+});

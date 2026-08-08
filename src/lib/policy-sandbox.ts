@@ -703,8 +703,18 @@ function generateArgBuilderLines(
       if (a.constraint.kind === "allowlist" && a.constraint.values.length > 0) {
         return `${indent}args.push_back(${generateLiteralForType(a.type, a.constraint.values[0])}.into_val(&env)); // ${a.name} (allowlisted)`;
       }
-      if (a.constraint.kind === "range" && a.constraint.min != null) {
-        return `${indent}args.push_back(${a.constraint.min}${numericSuffix(a.type)}.into_val(&env)); // ${a.name} (range min)`;
+      if (a.constraint.kind === "range") {
+        // Use a real in-range value, preferring the max — the largest thing the policy must
+        // still accept. Falling through to the 0 default below made every acceptance test
+        // send amount = 0, which ANY policy accepts: one that divided the cap by 10^7, or
+        // otherwise mis-scaled it, passed the whole suite and then rejected every real
+        // transfer. That is exactly the bug this suite is supposed to be the gate for, and
+        // testing at the boundary is what makes it one.
+        const bound = a.constraint.max ?? a.constraint.min;
+        if (bound != null) {
+          const which = a.constraint.max != null ? "range max" : "range min";
+          return `${indent}args.push_back(${numLiteral(BigInt(bound), a.type)}.into_val(&env)); // ${a.name} (${which}, must be accepted)`;
+        }
       }
     }
 

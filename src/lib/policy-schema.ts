@@ -88,7 +88,7 @@ function unitScale(decimals: number): bigint {
  */
 export function toBaseUnits(display: string, decimals: number): string | null {
   const trimmed = display.trim();
-  const m = /^(-?)(\d+)(?:\.(\d*))?$/.exec(trimmed);
+  const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(trimmed);
   if (!m) return null;
   const [, sign, whole, frac = ""] = m;
   if (frac.length > decimals) return null;
