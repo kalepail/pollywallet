@@ -33,8 +33,17 @@ nothing stops a future edit from quietly removing it.
 
 Every claim here was verified against the checked-in submodule
 `stellar-contracts/packages/accounts/` and the local clone of `stellar/smart-account-kit`
-on 2026-08-07. **Re-verify after bumping the submodule.** Where a claim is measured against
-the live Workers AI endpoint it says so.
+on 2026-08-07. Where a claim is measured against the live Workers AI endpoint it says so.
+
+**Type and ABI parity is now enforced, not remembered.** `oz-parity.test.ts` parses
+`ContextRule`, `Signer` and `ContextRuleType` out of the submodule and compares them
+field-for-field, in order, with derives, against the copies embedded in the prompt — plus the
+`Policy` trait's parameter names and the account's `execute` signature. Drift there is not a
+compile error: `#[contracttype]` structs cross the boundary as maps keyed by FIELD NAME, so a
+renamed or missing field decodes wrong on-chain, inside a policy that gates funds. When those
+tests fail after a submodule bump, the standard moved — update the prompt's CORE TYPES block
+and the harness, never the assertion. The prose claims below still need a human re-read after
+a bump; only the shapes are machine-checked.
 
 Read this before changing `buildSystemPrompt()`. The prompt is downstream of these facts;
 if the two disagree, the source wins.
