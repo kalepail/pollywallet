@@ -79,6 +79,12 @@ const TOOL_TO_MCP: Record<string, string> = {
 /** How much of a single tool result to feed back to the model. */
 const MAX_TOOL_RESULT_CHARS = 8_000;
 
+/**
+ * Deadline for a single Raven request. Research is a nice-to-have that runs before the real
+ * work, so it must never be the reason a generation never starts.
+ */
+export const RAVEN_REQUEST_TIMEOUT_MS = 20_000;
+
 type JsonRpcResponse = { result?: unknown; error?: { message?: string } };
 
 /**
@@ -101,16 +107,29 @@ export class RavenClient {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Raven may answer either as JSON or as a single SSE frame; accept both.
+        // Raven may answer either as JSON or as SSE frames; accept both.
         Accept: "application/json, text/event-stream",
         Authorization: `Bearer ${this.apiKey}`,
-        ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
+        // Required by the MCP transport spec on every request after initialization.
+        ...(this.sessionId
+          ? { "mcp-session-id": this.sessionId, "MCP-Protocol-Version": RAVEN_PROTOCOL_VERSION }
+          : {}),
       },
       body: JSON.stringify(body),
+      // Without a deadline a stalled Raven blocks the whole generation: the catch in callTool
+      // cannot run until fetch settles, and this runs BEFORE the streaming codegen, so the
+      // user gets a spinner and no contract. Fail fast and let generation proceed without
+      // research instead.
+      signal: AbortSignal.timeout(RAVEN_REQUEST_TIMEOUT_MS),
     });
 
     const sid = res.headers.get("mcp-session-id");
     if (sid) this.sessionId = sid;
+
+    // A session-scoped 404 means the server dropped our session. Clear it so the next call
+    // re-initializes rather than reusing an id the server has forgotten.
+    if (res.status === 404 && this.sessionId) this.sessionId = null;
+
     if (isNotification) return {};
 
     const text = await res.text();
@@ -152,13 +171,22 @@ export function parseMcpBody(text: string): JsonRpcResponse {
   if (!trimmed) return {};
   if (trimmed.startsWith("{")) return JSON.parse(trimmed);
 
-  // Take the last data: line — a frame sequence ends with the actual response.
-  const payloads = trimmed
-    .split("\n")
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim())
-    .filter(Boolean);
+  // SSE events are blank-line separated, and one event's `data:` may span several lines which
+  // must be rejoined with newlines before parsing. Splitting on lines and taking the last one
+  // corrupts any pretty-printed payload.
+  const events = trimmed.split(/\r?\n\r?\n/);
+  const payloads: string[] = [];
+  for (const event of events) {
+    const data = event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n")
+      .trim();
+    if (data) payloads.push(data);
+  }
   if (payloads.length === 0) throw new Error(`Unparseable MCP body: ${trimmed.slice(0, 160)}`);
+  // A frame sequence ends with the actual response.
   return JSON.parse(payloads[payloads.length - 1]);
 }
 

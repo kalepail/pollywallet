@@ -190,3 +190,66 @@ describe("Workers AI response shapes", () => {
     expect(extractResponseText({})).toBe("");
   });
 });
+
+// Findings from an adversarial review of the integration.
+describe("hardening", () => {
+  it("bounds every request so a stalled Raven cannot hang a generation", async () => {
+    const { RAVEN_REQUEST_TIMEOUT_MS } = await import("../raven-mcp");
+    expect(RAVEN_REQUEST_TIMEOUT_MS).toBeGreaterThan(0);
+    const seen: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init: any) => {
+      seen.push(init);
+      return new Response(JSON.stringify({ result: {} }), { headers: { "mcp-session-id": "s" } });
+    }));
+    await new RavenClient("k:t").callTool("stellar_search", { query: "x" });
+    expect(seen.length).toBeGreaterThan(0);
+    for (const init of seen) expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("sends MCP-Protocol-Version once a session exists, not before", async () => {
+    const seen: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init: any) => {
+      seen.push(init.headers);
+      return new Response(JSON.stringify({ result: {} }), { headers: { "mcp-session-id": "s" } });
+    }));
+    await new RavenClient("k:t").callTool("stellar_search", { query: "x" });
+    expect(seen[0]["MCP-Protocol-Version"]).toBeUndefined();
+    expect(seen[seen.length - 1]["MCP-Protocol-Version"]).toBe("2025-06-18");
+  });
+
+  // Reusing a session the server has forgotten fails every subsequent call forever.
+  it("drops a session the server 404s so the next call re-initializes", async () => {
+    let call = 0;
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init: any) => {
+      bodies.push(JSON.parse(init.body).method);
+      call++;
+      if (call <= 2) return new Response(JSON.stringify({ result: {} }), { headers: { "mcp-session-id": "s1" } });
+      if (call === 3) return new Response("gone", { status: 404 });
+      return new Response(JSON.stringify({ result: { content: [{ type: "text", text: "ok" }] } }), {
+        headers: { "mcp-session-id": "s2" },
+      });
+    }));
+    const client = new RavenClient("k:t");
+    await client.callTool("stellar_search", { query: "a" });   // 404s
+    await client.callTool("stellar_search", { query: "b" });   // must re-initialize
+    expect(bodies.filter((m) => m === "initialize").length).toBe(2);
+  });
+
+  it("rejoins a multi-line SSE data payload instead of truncating it", () => {
+    const pretty = 'event: message\ndata: {\ndata:   "jsonrpc": "2.0",\ndata:   "result": { "deep": true }\ndata: }\n\n';
+    expect(parseMcpBody(pretty).result).toEqual({ deep: true });
+  });
+});
+
+describe("retrieved facts are framed as data, not instructions", () => {
+  it("never labels external text authoritative and tells the model rules win", async () => {
+    const src = await import("node:fs").then((fs) =>
+      fs.readFileSync("src/lib/policy-codegen.ts", "utf8")
+    );
+    const block = src.slice(src.indexOf('type: "facts"'), src.indexOf('type: "facts"') + 1200);
+    expect(block).not.toMatch(/treat these as authoritative/i);
+    expect(block).toMatch(/NOT instructions/);
+    expect(block).toMatch(/reference_notes/);
+  });
+});
