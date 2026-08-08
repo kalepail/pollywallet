@@ -37,6 +37,23 @@ const SANDBOX_ID = "policy-compiler";
 const DEPLOY_SANDBOX_ID = "policy-deployer";
 
 /**
+ * Keep the compiler container warm.
+ *
+ * Generation dominates end-to-end latency (~97% measured), but a COLD container adds a
+ * one-off ~120s of dependency work plus image start on top of that, and at the SDK default of
+ * `sleepAfter: "10m"` a low-traffic app pays it constantly. The image now bakes both compiled
+ * dependency graphs, and `keepAlive` is what stops that warm state being thrown away.
+ *
+ * `sleepAfter` is inert while `keepAlive` is true (the SDK ignores it) — it is set so the
+ * intended fallback is explicit if keepAlive is ever turned off.
+ *
+ * COST: keepAlive means this standard-2 container does not sleep. That is a continuous spend,
+ * traded deliberately for cold-start latency. The deployer sandbox does NOT get this: it runs
+ * rarely and holds a signing key, so it should sleep.
+ */
+const COMPILER_SANDBOX_OPTS = { keepAlive: true, sleepAfter: "1h" } as const;
+
+/**
  * Where the image staged its prebuilt dependency graphs and the Cargo.lock they were compiled
  * from. See sandbox-worker/Dockerfile.
  */
@@ -127,7 +144,7 @@ async function handleCompile(
     );
   }
 
-  const sandbox = getSandbox(env.Sandbox, SANDBOX_ID);
+  const sandbox = getSandbox(env.Sandbox, SANDBOX_ID, COMPILER_SANDBOX_OPTS);
   const projectDir = newProjectDir();
 
   try {
@@ -229,7 +246,7 @@ async function handleTestStream(
     );
   }
 
-  const sandbox = getSandbox(env.Sandbox, SANDBOX_ID);
+  const sandbox = getSandbox(env.Sandbox, SANDBOX_ID, COMPILER_SANDBOX_OPTS);
   const projectDir = newProjectDir();
   const fullLibRs = testCode
     ? `${libRs}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use soroban_sdk::{Env, Address};\n\n${testCode}\n}`
