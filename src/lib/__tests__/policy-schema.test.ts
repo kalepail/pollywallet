@@ -563,3 +563,30 @@ describe("numeric bound validation", () => {
     expect(validateSchema(withRange(undefined, undefined)).valid).toBe(false);
   });
 });
+
+// A non-integer exact value reaches generated Rust as `<value><suffix>` — "1e5u32" is not a
+// Rust literal, and the crate fails to compile after a full cargo build.
+describe("exact numeric validation", () => {
+  const withExact = (type: string, value: string): PolicySchema => ({
+    $schema: SCHEMA_VERSION, name: "exact", description: "exact fixture", globalRules: [],
+    contracts: [{ address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "call", args: [{ name: "n", type, constraint: { kind: "exact", value } }] }] }],
+  } as PolicySchema);
+
+  it.each(["1e5", "1.5", "abc", "0x10", "1,000"])("rejects %j on a numeric argument", (bad) => {
+    const r = validateSchema(withExact("u32", bad));
+    expect(r.valid).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/must be a whole number/);
+  });
+
+  it("accepts integers, including negatives", () => {
+    expect(validateSchema(withExact("i128", "-1")).valid).toBe(true);
+    expect(validateSchema(withExact("u32", "100")).valid).toBe(true);
+  });
+
+  // Non-numeric arguments legitimately carry non-numeric exact values.
+  it("leaves address and symbol values alone", () => {
+    expect(validateSchema(withExact("symbol", "transfer")).valid).toBe(true);
+    expect(validateSchema(withExact("address", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC")).valid).toBe(true);
+  });
+});

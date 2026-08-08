@@ -43,16 +43,29 @@ function ident(raw: string): string {
   return /^[0-9]/.test(cleaned) ? `_${cleaned}` : cleaned || "_";
 }
 
+/**
+ * Escape a schema-supplied string for embedding in a Rust string literal.
+ *
+ * Every one of these values comes from a contract spec or a user-typed schema, and they land
+ * inside `"..."` in generated Rust. A name containing a quote or a backslash produced source
+ * that simply does not parse — a wasted cargo build, reported as an opaque compile failure
+ * rather than as "your function name has a quote in it". Two independent reviewers found this
+ * from opposite directions.
+ */
+function rustStr(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+}
+
 /** A Symbol expression: symbol_short! only accepts <=9 chars. */
 function symbolExpr(name: string, envRef: string): string {
   return name.length <= 9
-    ? `soroban_sdk::symbol_short!("${name}")`
-    : `soroban_sdk::Symbol::new(${envRef}, "${name}")`;
+    ? `soroban_sdk::symbol_short!("${rustStr(name)}")`
+    : `soroban_sdk::Symbol::new(${envRef}, "${rustStr(name)}")`;
 }
 
 function addressExpr(address: string, envRef: string): string {
   return address
-    ? `soroban_sdk::Address::from_string(&soroban_sdk::String::from_str(${envRef}, "${address}"))`
+    ? `soroban_sdk::Address::from_string(&soroban_sdk::String::from_str(${envRef}, "${rustStr(address)}"))`
     : `<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(${envRef})`;
 }
 
@@ -668,7 +681,7 @@ ${argLines}
     let signers = fixture_signers(&env);
     assert!(
         client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
-        "${why ?? "enforce() accepted a value that violates the policy schema"}"
+        "${rustStr(why ?? "enforce() accepted a value that violates the policy schema")}"
     );
 }`;
 }
@@ -800,16 +813,21 @@ function generateArgBuilderLines(
 function generateLiteralForType(argType: string, value: string): string {
   const t = argType.toLowerCase();
   if (t === "address") {
-    return `soroban_sdk::Address::from_string(&soroban_sdk::String::from_str(&env, "${value}"))`;
+    return `soroban_sdk::Address::from_string(&soroban_sdk::String::from_str(&env, "${rustStr(value)}"))`;
   }
-  if (t === "i128") return `${value}i128`;
-  if (t === "u128") return `${value}u128`;
-  if (t === "u64") return `${value}u64`;
-  if (t === "i64") return `${value}i64`;
-  if (t === "u32") return `${value}u32`;
-  if (t === "i32") return `${value}i32`;
+  // Route numerics through numLiteral so a negative is parenthesised: `-1i128.into_val(&env)`
+  // parses as `-(1i128.into_val(&env))` and fails with E0600, costing a whole cargo build.
+  if (numericBounds(t)) {
+    try {
+      return numLiteral(BigInt(value.trim()), t);
+    } catch {
+      // Not an integer. validateSchema rejects these, but emit something that fails loudly at
+      // compile time rather than silently producing a wrong value.
+      return `compile_error!("non-integer literal ${rustStr(value)} for ${rustStr(argType)}")`;
+    }
+  }
   if (t === "bool") return value === "true" ? "true" : "false";
-  if (t === "symbol") return `soroban_sdk::Symbol::new(&env, "${value}")`;
+  if (t === "symbol") return `soroban_sdk::Symbol::new(&env, "${rustStr(value)}")`;
   return `soroban_sdk::Val::VOID`;
 }
 
@@ -824,17 +842,31 @@ function generateWrongValueForType(argType: string, exactValue: string): string 
     // Use a randomly generated address (guaranteed different from any specific address)
     return `<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env)`;
   }
-  if (["i128", "u128", "i64", "u64", "i32", "u32"].includes(t)) {
-    // Use a value that's different from the exact value
-    const n = BigInt(exactValue || "0");
-    const wrong = n === 0n ? 1n : n + 1n;
-    return `${wrong}${numericSuffix(t)}`;
+  const bounds = numericBounds(t);
+  if (bounds) {
+    let n: bigint;
+    try {
+      n = BigInt((exactValue || "0").trim());
+    } catch {
+      // A non-integer exact value used to throw here, aborting the whole generation rather
+      // than producing a bad test. validateSchema rejects these now; skipping the rejection
+      // test is still better than taking the run down with it.
+      return null;
+    }
+    // Step away from the value, but stay inside the type. At the maximum, n + 1 does not fit:
+    // for a u32 exact of 4294967295 this emitted 4294967296u32, which does not compile.
+    const wrong = n < bounds.max ? n + 1n : n - 1n;
+    return numLiteral(wrong, t);
   }
   if (t === "bool") {
     return exactValue === "true" ? "false" : "true";
   }
   if (t === "symbol") {
-    return `soroban_sdk::Symbol::new(&env, "__wrong__")`;
+    // Must differ from the required value, or the "wrong" case is actually the right one and
+    // the rejection test fails against a CORRECT policy.
+    return exactValue === "__wrong__"
+      ? `soroban_sdk::Symbol::new(&env, "__wrong2__")`
+      : `soroban_sdk::Symbol::new(&env, "__wrong__")`;
   }
   return null; // Can't generate a wrong value for complex types
 }
@@ -907,7 +939,7 @@ function generateInstallParamsHelper(schema: PolicySchema): string {
     const val = p.type === "i128" ? `${p.value}i128`
       : p.type === "u32" ? `${p.value}u32`
       : p.value === "true" ? "true" : "false";
-    return `map.set(soroban_sdk::Symbol::new(env, "${p.key}").into_val(env), ${val}.into_val(env));`;
+    return `map.set(soroban_sdk::Symbol::new(env, "${rustStr(p.key)}").into_val(env), ${val}.into_val(env));`;
   });
 
   if (parts.length === 0) {

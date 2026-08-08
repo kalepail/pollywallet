@@ -245,7 +245,10 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
                 if (!validKinds.includes(arg.constraint.kind)) {
                   errors.push(`${aPrefix}: constraint kind "${arg.constraint.kind}" is not valid for type "${arg.type}"`);
                 }
-                const constraintErrors = validateConstraint(arg.constraint, aPrefix);
+                const numericArgType = constraintKindsForType(arg.type).includes("range")
+                  ? arg.type
+                  : undefined;
+                const constraintErrors = validateConstraint(arg.constraint, aPrefix, numericArgType);
                 errors.push(...constraintErrors);
 
                 // Address VALUES need the same checksum check as contract addresses. The
@@ -313,18 +316,32 @@ function collidingInstallParamKeys(schema: PolicySchema): string[] {
   return [...collisions].map(
     (key) =>
       `Conflicting values for install param "${key}": two functions constrain the same ` +
-      `argument name differently. Install params are a flat map, so only one bound would ` +
-      `survive. Rename the argument or split these into separate policies.`
+      `argument name with different values. Install params are a flat map, so only one bound ` +
+      `would survive. Argument names come from the contract ABI and cannot be renamed, so ` +
+      `either use the same bound for both, or split them into separate policies — one per ` +
+      `context rule.`
   );
 }
 
-function validateConstraint(constraint: ArgConstraint, prefix: string): string[] {
+function validateConstraint(
+  constraint: ArgConstraint,
+  prefix: string,
+  /** Set when the argument is a numeric Soroban type, so literals can be checked. */
+  numericArgType?: string,
+): string[] {
   const errors: string[] = [];
 
   switch (constraint.kind) {
     case "exact": {
       if (!constraint.value || typeof constraint.value !== "string") {
         errors.push(`${prefix}: exact constraint requires a value`);
+      } else if (numericArgType && !/^-?\d+$/.test(constraint.value.trim())) {
+        // Reaches generated Rust as `<value><suffix>`; "1e5" or "1.5" is not a Rust integer
+        // literal and the crate fails to compile after a full cargo build.
+        errors.push(
+          `${prefix}: exact value for a ${numericArgType} argument must be a whole number, ` +
+          `got "${constraint.value}"`
+        );
       }
       break;
     }

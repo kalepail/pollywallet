@@ -424,3 +424,80 @@ describe("time-lock windows are tested at both edges", () => {
     expect(rust).not.toContain("window_is_rejected");
   });
 });
+
+// Every case here produced Rust that does not parse or does not mean what it says — each one
+// costing a full cargo build to discover, reported as an opaque compile error. Found by two
+// independent reviewers approaching from opposite directions.
+describe("generated Rust survives hostile schema strings and values", () => {
+  const W = (args: any[], name = "call"): any => ({
+    $schema: "pollywallet-policy/v0", name: "hostile", description: "hostile fixture",
+    globalRules: [],
+    contracts: [{ address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name, args }] }],
+  });
+
+  // A quote in a function name closed the string literal early: symbol_short!("x"").
+  it("escapes quotes and backslashes in a function name", () => {
+    const rust = generateTestCases(W([], 'ev"il'));
+    expect(rust).toContain('ev\\"il');
+    expect(rust).not.toMatch(/symbol_short!\("ev"il"\)/);
+  });
+
+  it("escapes hostile values inside exact constraints", () => {
+    const rust = generateTestCases(W([{ name: "tag", type: "symbol", constraint: { kind: "exact", value: 'a"b' } }]));
+    expect(rust).toContain('a\\"b');
+  });
+
+  // -1i128.into_val(&env) parses as -(1i128.into_val(&env)) and fails with E0600.
+  it("parenthesises a negative exact literal", () => {
+    const rust = generateTestCases(W([{ name: "n", type: "i128", constraint: { kind: "exact", value: "-1" } }]));
+    expect(rust).toContain("(-1i128)");
+    expect(rust).not.toMatch(/(?<!\()-1i128\.into_val/);
+  });
+
+  it("parenthesises a negative range bound", () => {
+    const rust = generateTestCases(W([{ name: "n", type: "i128", constraint: { kind: "range", max: "-5" } }]));
+    expect(rust).toContain("(-5i128)");
+  });
+
+  // A non-integer would previously interpolate straight through as `1e5u32`.
+  it("fails loudly rather than emitting a non-integer literal", () => {
+    const rust = generateTestCases(W([{ name: "n", type: "u32", constraint: { kind: "exact", value: "1e5" } }]));
+    expect(rust).not.toMatch(/\b1e5u32\b/);
+    expect(rust).toContain("compile_error!");
+  });
+});
+
+// generateWrongValueForType builds the counterexample for a rejection test. It used to call
+// BigInt() unguarded and step past the type's maximum, so it either took the whole generation
+// down or emitted a literal that does not fit.
+describe("rejection counterexamples stay inside the type", () => {
+  const W = (type: string, value: string): any => ({
+    $schema: "pollywallet-policy/v0", name: "wrong", description: "wrong fixture", globalRules: [],
+    contracts: [{ address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "call", args: [{ name: "n", type, constraint: { kind: "exact", value } }] }] }],
+  });
+
+  it("steps down at the type maximum instead of overflowing", () => {
+    const rust = generateTestCases(W("u32", "4294967295"));
+    expect(rust).not.toContain("4294967296u32");
+    expect(rust).toContain("4294967294u32");
+  });
+
+  it("does not throw on a non-integer exact value", () => {
+    expect(() => generateTestCases(W("u32", "1e5"))).not.toThrow();
+    expect(() => generateTestCases(W("i128", "abc"))).not.toThrow();
+  });
+
+  it("parenthesises a negative counterexample", () => {
+    const rust = generateTestCases(W("i128", "-3"));
+    expect(rust).toMatch(/\(-2i128\)|\(-4i128\)/);
+  });
+
+  // If the counterexample equals the required value, the rejection test fails against a
+  // CORRECT policy — the worst kind of test, because it looks like a real defect.
+  it("never uses the required value as the counterexample", () => {
+    const rust = generateTestCases(W("symbol", "__wrong__"));
+    expect(rust).toContain("__wrong2__");
+  });
+});

@@ -478,7 +478,10 @@ RULES:
    the smart account requires.
 5. Define Signer, ContextRule, ContextRuleType as inline #[contracttype] enums/structs (copy from CORE TYPES below, including their derives).
 6. Use #[contracterror] for error enums and #[contractevent] with .publish(e) for events.
-7. Use persistent storage keyed by (smart_account_address, context_rule_id) via a StorageKey enum.
+   The error enum must be exactly \`#[contracterror] #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+   #[repr(u32)]\` with an explicit integer on every variant — the macro rejects anything less.
+7. Use persistent storage keyed by (smart_account_address, context_rule_id) via a
+   #[contracttype] StorageKey enum. Any struct you store or return needs #[contracttype] too.
    A deployed policy is MULTI-TENANT: the same contract serves many smart accounts and many
    context rules. Never key state by rule id alone and never key it globally.
 8. Always call smart_account.require_auth() at the start of enforce, install, and uninstall.
@@ -496,15 +499,22 @@ RULES:
     Mirror their structure; do not assume they are complete.
 
 COMMON MISTAKES TO AVOID:
+- This is \`#![no_std]\`: there is no \`format!\`, \`to_string()\`, \`vec![]\`, \`println!\`, \`HashMap\`
+  or \`String::from\`, and they cannot be imported. Build strings with
+  \`String::from_str(e, "...")\` and collections with \`Vec::new(e)\` / \`Map::new(e)\`.
+- Write NO test module, no \`fn main\`, no Cargo.toml. The harness supplies the tests, and
+  \`testutils\` (\`Address::generate\`, \`Env::default\`, \`mock_all_auths\`) does not exist outside
+  them.
 - symbol_short!() ONLY accepts string literals up to 9 ASCII characters. "transfer" (8 chars) is OK. "approve_all" (11 chars) is NOT. For function names longer than 9 chars, use Symbol::new(env, "long_function_name") instead and compare with == Symbol::new(env, "...").
 - Do NOT hardcode contract addresses as byte arrays. Stellar StrKey addresses are base32, NOT hex — never write BytesN::from_array with address characters. If you need to reference a specific contract address, use Address::from_string(&String::from_str(e, "C...")) or better yet rely on ContextRuleType::CallContract(addr) from the context_rule which already provides the scoped address.
 - Do NOT create helper functions like get_target_contract() that try to decode Stellar addresses. The context_rule.context_type already contains the contract Address.
 - Imports: start from this line and keep only what you use — unused imports are warnings, not
   errors, so it is always safer to over-import than to miss one:
-  \`use soroban_sdk::{contract, contractimpl, contracttype, contracterror, contractevent, panic_with_error, Address, Bytes, BytesN, Env, FromVal, IntoVal, Map, String, Symbol, TryFromVal, TryIntoVal, Val, Vec};\`
+  \`use soroban_sdk::{contract, contractimpl, contracttype, contracterror, contractevent, panic_with_error, symbol_short, Address, Bytes, BytesN, Env, FromVal, IntoVal, Map, String, Symbol, TryFromVal, TryIntoVal, Val, Vec};\`
   \`use soroban_sdk::auth::{Context, ContractContext};\`
   Precede the block with \`#[allow(unused_imports)]\` so trimming is never required.
-- The install function signature MUST be: \`pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)\`.
+  \`symbol_short\` is in that list deliberately: it is a macro, it is NOT in scope by default,
+  and the guidance below tells you to call it.
 - The smart account passes \`install_params\` through UNCHANGED — it does not decode or transform
   it. PollyWallet sends a Soroban Map whose keys are Symbols naming the config fields.
 - Decode it as \`Map<Val, Val>\` and read keys individually. A Symbol-keyed Map is also the
