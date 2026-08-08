@@ -95,6 +95,20 @@ function BuildLog({ log }: { log?: string[] }) {
   );
 }
 
+/**
+ * Summarise a build timeline.
+ *
+ * `fixed` marks a FAILED attempt whose code was repaired and retried, so the repair count is
+ * the number of failures carrying it — never the total number of entries with the flag. The
+ * successful final entry must not carry it, or one repair reads as two.
+ */
+export function summarizeBuildAttempts(attempts: BuildAttempt[]): string {
+  if (attempts.length === 1) return "1 build attempt";
+  const failed = attempts.filter((a) => !a.compiled).length;
+  const fixed = attempts.filter((a) => !a.compiled && a.fixed).length;
+  return `${attempts.length} build attempts (${failed} failed, ${fixed} auto-fixed)`;
+}
+
 function BuildTimeline({ attempts }: { attempts: BuildAttempt[] }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -109,9 +123,7 @@ function BuildTimeline({ attempts }: { attempts: BuildAttempt[] }) {
       >
         <Wrench size={14} className="text-amber-400 shrink-0" />
         <span className="text-xs text-gray-400 flex-1">
-          {attempts.length === 1
-            ? "1 build attempt"
-            : `${attempts.length} build attempts (${attempts.filter(a => !a.compiled).length} failed, ${attempts.filter(a => a.fixed).length} auto-fixed)`}
+          {summarizeBuildAttempts(attempts)}
         </span>
         <CaretDown
           size={14}

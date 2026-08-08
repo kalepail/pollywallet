@@ -421,7 +421,12 @@ function PolicyBuilder() {
             attempt: attempt + 1,
             compiled: true,
             errors: "",
-            fixed: attempt > 0,
+            // `fixed` means "this attempt's code was repaired and retried", and it is set on
+            // the FAILING entry when the repair succeeds (below). Setting it here too counted
+            // every repair twice: one auto-fix rendered as "2 build attempts (1 failed,
+            // 2 auto-fixed)", which reads like the pipeline is falling over when it recovered
+            // on the first try.
+            fixed: false,
           });
           setBuildTimeline([...timeline]);
 

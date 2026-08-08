@@ -371,6 +371,51 @@ function ArgRow({
 // ConstraintEditor — renders inputs for the active constraint kind
 // ============================================================
 
+/**
+ * A number field that shows human units while the schema stores base units.
+ *
+ * It has to keep its own draft text. Converting on every keystroke round-trips the value
+ * through toBaseUnits/toDisplayUnits, and "1." normalises straight back to "1" — so the
+ * decimal point vanishes as you type it and a fraction can never be entered at all. The draft
+ * holds exactly what was typed; the schema only sees a value once it parses.
+ */
+function AmountInput({
+  label,
+  placeholder,
+  base,
+  decimals,
+  onChange,
+}: {
+  label: string;
+  placeholder?: string;
+  base?: string;
+  decimals?: number;
+  onChange: (base: string | undefined) => void;
+}) {
+  const display = base == null ? "" : decimals != null ? toDisplayUnits(base, decimals) : base;
+  const [draft, setDraft] = useState<string | null>(null);
+  // Show the draft while typing; otherwise reflect the schema, so an external change lands.
+  const value = draft ?? display;
+
+  return (
+    <ParamInput
+      label={label}
+      placeholder={placeholder}
+      value={value}
+      onChange={(typed) => {
+        setDraft(typed);
+        if (!typed) return onChange(undefined);
+        if (decimals == null) return onChange(typed);
+        const converted = toBaseUnits(typed, decimals);
+        // Mid-edit text like "1." or "0." is not yet a number. Hold the draft and leave the
+        // stored value alone rather than writing an unparseable string into the schema.
+        if (converted != null) onChange(converted);
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  );
+}
+
 function ConstraintEditor({
   constraint,
   onChange,
@@ -385,40 +430,38 @@ function ConstraintEditor({
 
   switch (constraint.kind) {
     case "exact":
+      // An exact bound is compared against the same base-unit argument a range is, so it needs
+      // the identical conversion. Left raw, "exact 100" installs 100 stroops — the original bug
+      // wearing a different constraint kind.
       return (
-        <ParamInput
-          label="Value"
+        <AmountInput
+          label={decimals != null ? `Value (whole units, ${decimals} dp)` : "Value"}
           placeholder="Exact value to match"
-          value={constraint.value}
-          onChange={(v) => onChange({ kind: "exact", value: v })}
+          base={constraint.value}
+          decimals={decimals}
+          onChange={(v) => onChange({ kind: "exact", value: v ?? "" })}
         />
       );
     case "range": {
       // The schema always stores base units, because that is what the contract compares
-      // against. When we know the token's scale, these two inputs are the ONLY place a human
-      // number is allowed to exist — type 100, install 1000000000. Bounds that fail to parse
-      // are kept verbatim so a half-typed "1." is not silently discarded mid-keystroke.
-      const show = (v?: string) =>
-        v == null ? "" : decimals != null ? toDisplayUnits(v, decimals) : v;
-      const store = (v: string) => {
-        if (!v) return undefined;
-        if (decimals == null) return v;
-        return toBaseUnits(v, decimals) ?? v;
-      };
+      // against. When we know the token's scale, these inputs are the ONLY place a human
+      // number is allowed to exist — type 100, install 1000000000.
       const unit = decimals != null ? ` (whole units, ${decimals} dp)` : "";
       return (
         <div className="flex gap-2">
-          <ParamInput
+          <AmountInput
             label={`Min${unit}`}
             placeholder="Optional"
-            value={show(constraint.min)}
-            onChange={(v) => onChange({ ...constraint, min: store(v) })}
+            base={constraint.min}
+            decimals={decimals}
+            onChange={(v) => onChange({ ...constraint, min: v })}
           />
-          <ParamInput
+          <AmountInput
             label={`Max${unit}`}
             placeholder="Optional"
-            value={show(constraint.max)}
-            onChange={(v) => onChange({ ...constraint, max: store(v) })}
+            base={constraint.max}
+            decimals={decimals}
+            onChange={(v) => onChange({ ...constraint, max: v })}
           />
         </div>
       );
@@ -600,11 +643,13 @@ function ParamInput({
   placeholder,
   value,
   onChange,
+  onBlur,
 }: {
   label: string;
-  placeholder: string;
+  placeholder?: string;
   value: string;
   onChange: (value: string) => void;
+  onBlur?: () => void;
 }) {
   return (
     <div className="flex-1">
@@ -614,6 +659,7 @@ function ParamInput({
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
         className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-violet-500 transition-colors"
       />
     </div>

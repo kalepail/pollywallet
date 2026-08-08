@@ -506,3 +506,41 @@ describe("token amount unit conversion", () => {
     expect(isAmountArg({ name: "id", type: "u32" } as any, 7)).toBe(false);
   });
 });
+
+// Install params are a flat map keyed by "max_{arg}", so two functions constraining an
+// argument of the same name collide and an ScMap silently keeps one. Found by an adversarial
+// reviewer: transfer(amount) max 100 and burn(amount) max 50 both emit `max_amount`.
+describe("colliding install param keys", () => {
+  const build = (transferMax: string, burnMax: string): PolicySchema => ({
+    $schema: SCHEMA_VERSION,
+    name: "collide",
+    description: "collision fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      decimals: 7,
+      functions: [
+        { name: "transfer", args: [{ name: "amount", type: "i128", constraint: { kind: "range", max: transferMax } }] },
+        { name: "burn", args: [{ name: "amount", type: "i128", constraint: { kind: "range", max: burnMax } }] },
+      ],
+    }],
+  } as PolicySchema);
+
+  it("rejects two different bounds that would emit the same key", () => {
+    const result = validateSchema(build("1000000000", "500000000"));
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/max_amount/);
+    expect(result.errors.join(" ")).toMatch(/only one bound would survive/);
+  });
+
+  // The same bound written twice is one constraint expressed redundantly, not a conflict.
+  it("allows the identical bound on both functions", () => {
+    expect(validateSchema(build("1000000000", "1000000000")).valid).toBe(true);
+  });
+
+  it("leaves a single-function schema alone", () => {
+    const schema = build("1000000000", "1000000000");
+    schema.contracts[0].functions = [schema.contracts[0].functions[0]];
+    expect(validateSchema(schema).valid).toBe(true);
+  });
+});

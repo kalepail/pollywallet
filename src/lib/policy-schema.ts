@@ -308,7 +308,36 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
     }
   }
 
+  errors.push(...collidingInstallParamKeys(schema));
+
   return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Install params are a flat Map keyed by "max_{arg}"/"min_{arg}"/"allowed_{arg}", so two
+ * functions that constrain an argument of the SAME NAME collide — `transfer(amount)` capped at
+ * 100 and `burn(amount)` capped at 50 both emit `max_amount`. An ScMap cannot hold a duplicate
+ * key: one bound silently disappears and the policy enforces the wrong number, with nothing
+ * on screen to say so.
+ *
+ * The flat key space is what the generated contract and the prompt convention are built on, so
+ * rather than silently picking a winner, refuse the schema. Identical values are harmless and
+ * allowed — that is one bound expressed twice, not two bounds.
+ */
+function collidingInstallParamKeys(schema: PolicySchema): string[] {
+  const seen = new Map<string, string>();
+  const collisions = new Set<string>();
+  for (const param of installParamsSpec(schema)) {
+    const previous = seen.get(param.key);
+    if (previous !== undefined && previous !== param.value) collisions.add(param.key);
+    else seen.set(param.key, param.value);
+  }
+  return [...collisions].map(
+    (key) =>
+      `Conflicting values for install param "${key}": two functions constrain the same ` +
+      `argument name differently. Install params are a flat map, so only one bound would ` +
+      `survive. Rename the argument or split these into separate policies.`
+  );
 }
 
 function validateConstraint(constraint: ArgConstraint, prefix: string): string[] {
