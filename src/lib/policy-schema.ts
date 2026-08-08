@@ -150,8 +150,11 @@ export function constraintKindsForType(argType: string): ArgConstraintKind[] {
   if (t === "address") {
     return ["unconstrained", "exact", "allowlist", "blocklist"];
   }
-  if (["i128", "u128", "i64", "u64", "i32", "u32", "i256", "u256", "timepoint", "duration"].includes(t)) {
+  if (t === "i128") {
     return ["unconstrained", "exact", "range"];
+  }
+  if (["u128", "i64", "u64", "i32", "u32"].includes(t)) {
+    return ["unconstrained", "exact"];
   }
   if (t === "bool") {
     return ["unconstrained", "exact"];
@@ -161,6 +164,26 @@ export function constraintKindsForType(argType: string): ArgConstraintKind[] {
   }
   // Complex types (Vec, Map, struct, enum, bytes, etc.) — notes only
   return ["unconstrained"];
+}
+
+function isHarnessRepresentableType(argType: string): boolean {
+  const t = argType.toLowerCase();
+  return [
+    "address", "i128", "u128", "i64", "u64", "i32", "u32", "bool", "symbol",
+    "string", "u256", "i256", "timepoint", "duration", "bytes",
+  ].includes(t) || /^bytes<\d+>$/.test(t) || /^(vec|option)<.+>$/.test(t) || /^map<.+,.+>$/.test(t);
+}
+
+function numericTypeBounds(argType: string): { min: bigint; max: bigint } | null {
+  switch (argType.toLowerCase()) {
+    case "i128": return { min: -(2n ** 127n), max: 2n ** 127n - 1n };
+    case "u128": return { min: 0n, max: 2n ** 128n - 1n };
+    case "i64": return { min: -(2n ** 63n), max: 2n ** 63n - 1n };
+    case "u64": return { min: 0n, max: 2n ** 64n - 1n };
+    case "i32": return { min: -(2n ** 31n), max: 2n ** 31n - 1n };
+    case "u32": return { min: 0n, max: 2n ** 32n - 1n };
+    default: return null;
+  }
 }
 
 // --- Validation ---
@@ -238,16 +261,23 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
               }
               if (!arg.type || typeof arg.type !== "string") {
                 errors.push(`${aPrefix}: type is required`);
+              } else if (!isHarnessRepresentableType(arg.type)) {
+                errors.push(
+                  `${aPrefix}: type "${arg.type}" is not supported because the policy test harness cannot represent it`,
+                );
               }
 
               if (arg.constraint && arg.constraint.kind !== "unconstrained") {
                 const validKinds = constraintKindsForType(arg.type);
                 if (!validKinds.includes(arg.constraint.kind)) {
-                  errors.push(`${aPrefix}: constraint kind "${arg.constraint.kind}" is not valid for type "${arg.type}"`);
+                  errors.push(
+                    `${aPrefix}: constraint kind "${arg.constraint.kind}" is not valid for type ` +
+                    `"${arg.type}" because it is not yet supported by the policy test harness; ` +
+                    `use unconstrained with a note, ` +
+                    `but note-driven behavior cannot be verified automatically`,
+                  );
                 }
-                const numericArgType = constraintKindsForType(arg.type).includes("range")
-                  ? arg.type
-                  : undefined;
+                const numericArgType = numericTypeBounds(arg.type) ? arg.type : undefined;
                 const constraintErrors = validateConstraint(arg.constraint, aPrefix, numericArgType);
                 errors.push(...constraintErrors);
 
@@ -342,6 +372,12 @@ function validateConstraint(
           `${prefix}: exact value for a ${numericArgType} argument must be a whole number, ` +
           `got "${constraint.value}"`
         );
+      } else if (numericArgType) {
+        const bounds = numericTypeBounds(numericArgType)!;
+        const value = BigInt(constraint.value.trim());
+        if (value < bounds.min || value > bounds.max) {
+          errors.push(`${prefix}: exact value ${constraint.value} is outside the ${numericArgType} range`);
+        }
       }
       break;
     }
@@ -357,6 +393,12 @@ function validateConstraint(
       for (const [name, bound] of [["min", constraint.min], ["max", constraint.max]] as const) {
         if (bound != null && !/^-?\d+$/.test(String(bound).trim())) {
           errors.push(`${prefix}: range ${name} must be a whole number in base units, got "${bound}"`);
+        } else if (bound != null && numericArgType) {
+          const bounds = numericTypeBounds(numericArgType)!;
+          const value = BigInt(String(bound).trim());
+          if (value < bounds.min || value > bounds.max) {
+            errors.push(`${prefix}: range ${name} ${bound} is outside the ${numericArgType} range`);
+          }
         }
       }
       if (
@@ -365,6 +407,18 @@ function validateConstraint(
         BigInt(String(constraint.min).trim()) > BigInt(String(constraint.max).trim())
       ) {
         errors.push(`${prefix}: range min (${constraint.min}) is greater than max (${constraint.max})`);
+      }
+      if (numericArgType) {
+        const bounds = numericTypeBounds(numericArgType)!;
+        const min = constraint.min != null && /^-?\d+$/.test(String(constraint.min).trim())
+          ? BigInt(String(constraint.min).trim()) : bounds.min;
+        const max = constraint.max != null && /^-?\d+$/.test(String(constraint.max).trim())
+          ? BigInt(String(constraint.max).trim()) : bounds.max;
+        if (min <= bounds.min && max >= bounds.max) {
+          errors.push(
+            `${prefix}: range covers every ${numericArgType} value, so the test harness cannot produce a rejection counterexample`,
+          );
+        }
       }
       break;
     }

@@ -52,6 +52,24 @@ describe("buildSystemPrompt", () => {
     expect(prompt).not.toMatch(/No such context is ever delivered/);
   });
 
+  // A context rule is an authorization ALTERNATIVE, not a wallet-wide restriction. The caller
+  // supplies AuthPayload.context_rule_ids and do_check_auth validates each context against
+  // exactly that id, with no iteration or auto-discovery (submodule
+  // stellar-contracts/packages/accounts/src/smart_account/storage.rs:137, :468-481; and
+  // smart_account/mod.rs:43-46). A Default rule additionally matches ANY context
+  // (storage.rs:303-304). So a cap on one rule binds only transactions that SELECT that rule.
+  // The prompt has no reason to describe the account-level model — a policy enforces its own
+  // rule either way — but it must never acquire language implying broader reach, which would
+  // license the model to skip a check on the theory that the account already blocked it.
+  it("must not describe a policy as a wallet-wide restriction", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).not.toMatch(/wallet-wide|account-wide/i);
+    expect(prompt).not.toMatch(/(restricts|constrains|governs) (the |all )?(wallet|account|transactions)/i);
+    // Rules are selected by caller-supplied id, never found by scanning.
+    expect(prompt).not.toMatch(/(iterates?|scans?|searches) (over |through )?(the )?(context )?rules/i);
+    expect(prompt).not.toMatch(/auto-discover/i);
+  });
+
   // Falling back to a permissive value on missing config turns a malformed install into a
   // policy that authorizes everything — the exact inverse of its purpose.
   it("must instruct the model to fail closed on install params", () => {

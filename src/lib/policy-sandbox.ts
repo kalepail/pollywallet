@@ -453,7 +453,11 @@ fn test_double_install_is_rejected() {
               }));
               // Negative: an UNLISTED value must be rejected. Without this a no-op enforce()
               // passed every allowlist-only schema.
-              const notAllowed = generateWrongValueForType(arg.type, allowedValue);
+              const notAllowed = generateWrongValueForType(
+                arg.type,
+                allowedValue,
+                arg.constraint.values,
+              );
               if (notAllowed) {
                 tests.push(rejectionTest({
                   name: `test_enforce_${suffix}_${ident(arg.name)}_not_allowlisted`,
@@ -805,7 +809,18 @@ function generateArgBuilderLines(
     if (t === "i32") return `${indent}args.push_back(0i32.into_val(&env)); // ${a.name}`;
     if (t === "bool") return `${indent}args.push_back(false.into_val(&env)); // ${a.name}`;
     if (t === "symbol") return `${indent}args.push_back(soroban_sdk::Symbol::new(&env, "").into_val(&env)); // ${a.name}`;
-    return `${indent}args.push_back(soroban_sdk::Val::VOID.into_val(&env)); // ${a.name}`;
+    if (t === "string") return `${indent}args.push_back(soroban_sdk::String::from_str(&env, "").into_val(&env)); // ${a.name}`;
+    if (t === "u256") return `${indent}args.push_back(soroban_sdk::U256::from_u32(&env, 0).into_val(&env)); // ${a.name}`;
+    if (t === "i256") return `${indent}args.push_back(soroban_sdk::I256::from_i32(&env, 0).into_val(&env)); // ${a.name}`;
+    if (t === "timepoint") return `${indent}args.push_back(soroban_sdk::Timepoint::from_unix(&env, 0).into_val(&env)); // ${a.name}`;
+    if (t === "duration") return `${indent}args.push_back(soroban_sdk::Duration::from_seconds(&env, 0).into_val(&env)); // ${a.name}`;
+    if (t === "bytes") return `${indent}args.push_back(soroban_sdk::Bytes::new(&env).into_val(&env)); // ${a.name}`;
+    const bytesN = t.match(/^bytes<(\d+)>$/)?.[1];
+    if (bytesN) return `${indent}args.push_back(soroban_sdk::BytesN::<${bytesN}>::from_array(&env, &[0u8; ${bytesN}]).into_val(&env)); // ${a.name}`;
+    if (/^vec<.+>$/.test(t)) return `${indent}args.push_back(soroban_sdk::Vec::<soroban_sdk::Val>::new(&env).into_val(&env)); // ${a.name}`;
+    if (/^map<.+,.+>$/.test(t)) return `${indent}args.push_back(soroban_sdk::Map::<soroban_sdk::Val, soroban_sdk::Val>::new(&env).into_val(&env)); // ${a.name}`;
+    if (/^option<.+>$/.test(t)) return `${indent}args.push_back(Option::<soroban_sdk::Val>::None.into_val(&env)); // ${a.name}`;
+    return `${indent}compile_error!("unsupported positive-control argument type: ${rustStr(a.type)}");`;
   }).join("\n");
 }
 
@@ -828,7 +843,8 @@ function generateLiteralForType(argType: string, value: string): string {
   }
   if (t === "bool") return value === "true" ? "true" : "false";
   if (t === "symbol") return `soroban_sdk::Symbol::new(&env, "${rustStr(value)}")`;
-  return `soroban_sdk::Val::VOID`;
+  if (t === "string") return `soroban_sdk::String::from_str(&env, "${rustStr(value)}")`;
+  return `compile_error!("unsupported constrained argument type: ${rustStr(argType)}")`;
 }
 
 /**
@@ -836,11 +852,17 @@ function generateLiteralForType(argType: string, value: string): string {
  * Used for exact-constraint negative tests — the returned value must NOT
  * match the constraint so enforce() should reject it.
  */
-function generateWrongValueForType(argType: string, exactValue: string): string | null {
+function generateWrongValueForType(
+  argType: string,
+  exactValue: string,
+  forbiddenValues: string[] = [exactValue],
+): string | null {
   const t = argType.toLowerCase();
   if (t === "address") {
-    // Use a randomly generated address (guaranteed different from any specific address)
-    return `<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env)`;
+    const excluded = forbiddenValues.map(value =>
+      `candidate == soroban_sdk::Address::from_string(&soroban_sdk::String::from_str(&env, "${rustStr(value)}"))`
+    ).join(" || ");
+    return `{ let mut candidate = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env); while ${excluded} { candidate = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env); } candidate }`;
   }
   const bounds = numericBounds(t);
   if (bounds) {
@@ -861,14 +883,16 @@ function generateWrongValueForType(argType: string, exactValue: string): string 
   if (t === "bool") {
     return exactValue === "true" ? "false" : "true";
   }
-  if (t === "symbol") {
-    // Must differ from the required value, or the "wrong" case is actually the right one and
-    // the rejection test fails against a CORRECT policy.
-    return exactValue === "__wrong__"
-      ? `soroban_sdk::Symbol::new(&env, "__wrong2__")`
-      : `soroban_sdk::Symbol::new(&env, "__wrong__")`;
+  if (t === "symbol" || t === "string") {
+    // Must differ from every allowlisted value, or the "wrong" case is actually allowed and
+    // the rejection test fails against a correct policy.
+    let wrong = "__wrong__";
+    for (let i = 2; forbiddenValues.includes(wrong); i++) wrong = `__wrong${i}__`;
+    return t === "symbol"
+      ? `soroban_sdk::Symbol::new(&env, "${wrong}")`
+      : `soroban_sdk::String::from_str(&env, "${wrong}")`;
   }
-  return null; // Can't generate a wrong value for complex types
+  return null; // validateSchema refuses constraints on types without a counterexample
 }
 
 /**

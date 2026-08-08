@@ -270,11 +270,57 @@ describe("constraintKindsForType", () => {
     expect(constraintKindsForType("Map<symbol, i128>")).toEqual(["unconstrained"]);
   });
 
+  it.each(["u256", "i256", "timepoint", "duration"])(
+    "only advertises unconstrained for %s until the harness can falsify its constraints",
+    (type) => expect(constraintKindsForType(type)).toEqual(["unconstrained"]),
+  );
+
+  it.each(["u128", "i64", "u64", "i32", "u32"])(
+    "does not advertise range for %s while install params are i128",
+    (type) => expect(constraintKindsForType(type)).toEqual(["unconstrained", "exact"]),
+  );
+
   it("should return exact + unconstrained for bool", () => {
     const kinds = constraintKindsForType("bool");
     expect(kinds).toContain("exact");
     expect(kinds).toContain("unconstrained");
     expect(kinds).not.toContain("range");
+  });
+});
+
+describe("harness-representable argument types", () => {
+  const withArg = (type: string, constraint?: any): PolicySchema => {
+    const schema = validSchema();
+    schema.contracts[0].functions[0].args = [{ name: "value", type, constraint }];
+    return schema;
+  };
+
+  it.each(["u256", "i256", "timepoint", "duration"])(
+    "rejects an advertised-looking constraint on %s with an actionable error",
+    (type) => {
+      const result = validateSchema(withArg(type, { kind: "exact", value: "1" }));
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toContain(`type "${type}"`);
+      expect(result.errors.join(" ")).toMatch(/not yet supported/);
+    },
+  );
+
+  it.each(["Profile", "(u32, address)", "Result<u32, error>", "val", "bytes<N>"])(
+    "rejects unrepresentable type %s instead of letting the positive control use VOID",
+    (type) => {
+      const result = validateSchema(withArg(type));
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toContain(`type "${type}"`);
+      expect(result.errors.join(" ")).toMatch(/test harness cannot represent/);
+    },
+  );
+
+  it.each([
+    "address", "i128", "u128", "i64", "u64", "i32", "u32", "bool", "symbol",
+    "string", "u256", "i256", "timepoint", "duration", "bytes", "bytes<32>",
+    "Vec<address>", "Map<address, i128>", "Option<address>",
+  ])("accepts an unconstrained %s because the harness has a typed value for it", (type) => {
+    expect(validateSchema(withArg(type)).valid).toBe(true);
   });
 });
 
@@ -538,10 +584,21 @@ describe("numeric bound validation", () => {
     }],
   } as PolicySchema);
 
-  it("accepts whole base-unit numbers, including negatives and huge values", () => {
+  it("accepts whole base-unit numbers, including negatives", () => {
     expect(validateSchema(withRange(undefined, "1000000000")).valid).toBe(true);
     expect(validateSchema(withRange("-1", "0")).valid).toBe(true);
-    expect(validateSchema(withRange(undefined, "170141183460469231731687303715884105727")).valid).toBe(true);
+  });
+
+  it("rejects a range covering the whole type because it has no possible rejection test", () => {
+    const result = validateSchema(withRange(undefined, "170141183460469231731687303715884105727"));
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/cannot produce a rejection counterexample/);
+  });
+
+  it("rejects a bound outside its Soroban type instead of emitting uncompilable Rust", () => {
+    const result = validateSchema(withRange(undefined, "170141183460469231731687303715884105728"));
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/outside the i128 range/);
   });
 
   it.each(["1.5", "1e9", "abc", "0x10", "1,000", " ", "100 XLM"])(
@@ -582,6 +639,12 @@ describe("exact numeric validation", () => {
   it("accepts integers, including negatives", () => {
     expect(validateSchema(withExact("i128", "-1")).valid).toBe(true);
     expect(validateSchema(withExact("u32", "100")).valid).toBe(true);
+  });
+
+  it("rejects an integer outside its Soroban type instead of emitting uncompilable Rust", () => {
+    const result = validateSchema(withExact("u32", "4294967296"));
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/outside the u32 range/);
   });
 
   // Non-numeric arguments legitimately carry non-numeric exact values.

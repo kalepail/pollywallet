@@ -143,6 +143,36 @@ Recorded so they read as decisions rather than oversights. Re-open them before m
   self-hosted and free to the owner. `RAVEN_REQUEST_TIMEOUT_MS` bounds the failure mode that
   actually mattered, which was a stalled request hanging a generation.
 
+## A policy rule is an authorization alternative, not a wallet firewall
+
+Installing a policy does not restrict what the wallet can do. It adds one more way to authorize
+a transaction, bounded by that policy. Two properties of the standard produce that:
+
+* **The caller picks the rule.** `AuthPayload.context_rule_ids` is supplied by whoever builds the
+  transaction — one entry per auth context — and `do_check_auth` validates each context against
+  exactly that id. There is no iteration and no auto-discovery
+  (`smart_account/storage.rs:137`, `:468-481`; the doc comment at `:116-120` states the caller
+  must select explicitly, and `smart_account/mod.rs:43-46` repeats it). The ids *are* bound into
+  the signed digest (`storage.rs:492-495`), so nobody can swap them after signatures are
+  collected — but the signer's own choice among the rules it can satisfy is free.
+* **A `Default` rule authorizes any context.** `get_validated_context_by_id` accepts when
+  `context_rule.context_type == ContextRuleType::Default || context_rule.context_type ==
+  required_type` (`storage.rs:303-304`).
+
+Concretely: a wallet holding rule #0 "multisig" (`Default`, passkey, no policies) plus rule #1
+carrying a 100 XLM cap. A passkey holder moves 10,000 XLM by putting `0` in `context_rule_ids`.
+Rule #1's cap constrains only the transactions that *select* rule #1. Installing it narrowed
+nothing about rule #0. This repo makes the choice literal — the wallet page's "Sign with"
+dropdown is the caller choosing `context_rule_ids`.
+
+This is the designed behaviour of the standard, not a bug in it. What a policy buys is a path
+that a weaker key may use — an ephemeral ed25519 signer with no biometric — bounded by the
+policy. It is not a restriction on the strong key. To bound the strong key you have to change
+the strong key's own rule; adding rules beside it only adds alternatives.
+
+The practical rule when reasoning about a cap: a wallet's spending ceiling is the *maximum* over
+the rules a given signer can satisfy, never the minimum.
+
 ## The other things that are easy to get wrong
 
 ### 1. There are TWO context shapes, and the `execute()` wrapper is real

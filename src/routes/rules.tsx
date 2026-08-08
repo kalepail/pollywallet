@@ -278,6 +278,10 @@ export function RulesManager() {
           <p className="text-gray-400">
             View, rename, and delete signing rules on your smart wallet
           </p>
+          <p className="text-gray-500 text-sm mt-2">
+            Each rule is a separate way to authorize a transaction, and the sender picks
+            which one to use — so limits on one rule do not constrain the others.
+          </p>
         </div>
 
         {/* Status / Error */}

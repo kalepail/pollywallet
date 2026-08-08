@@ -12,7 +12,7 @@ vi.mock("@tanstack/react-start", () => ({
   }),
 }));
 
-import { installParamsSpec } from "../policy-schema";
+import { constraintKindsForType, installParamsSpec, validateSchema } from "../policy-schema";
 import { generateTestCases, parseSseFrames } from "../policy-sandbox";
 import type { PolicySchema } from "../policy-schema";
 import { SCHEMA_VERSION } from "../policy-schema";
@@ -499,5 +499,87 @@ describe("rejection counterexamples stay inside the type", () => {
   it("never uses the required value as the counterexample", () => {
     const rust = generateTestCases(W("symbol", "__wrong__"));
     expect(rust).toContain("__wrong2__");
+  });
+});
+
+describe("argument type honesty", () => {
+  const withArgs = (args: any[]): PolicySchema => ({
+    $schema: SCHEMA_VERSION,
+    name: "type-honesty",
+    description: "type honesty fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "call", args }],
+    }],
+  });
+
+  it("never emits Val::VOID for a positive argument of any accepted type", () => {
+    const types = [
+      "address", "i128", "u128", "i64", "u64", "i32", "u32", "bool", "symbol",
+      "string", "u256", "i256", "timepoint", "duration", "bytes", "bytes<32>",
+      "Vec<address>", "Map<address, i128>", "Option<address>",
+    ];
+    const schema = withArgs(types.map((type, i) => ({ name: `arg_${i}`, type })));
+    expect(validateSchema(schema).valid).toBe(true);
+
+    const helpers = generateTestCases(schema).match(
+      /fn build_default_args[\s\S]*?\n}\n\nfn create_function_context/,
+    )?.[0] ?? "";
+    expect(helpers).not.toContain("Val::VOID");
+    for (let i = 0; i < types.length; i++) expect(helpers).toContain(`// arg_${i}`);
+    expect(helpers).toContain("String::from_str(env, \"\")");
+    expect(helpers).toContain("U256::from_u32(env, 0)");
+    expect(helpers).toContain("I256::from_i32(env, 0)");
+    expect(helpers).toContain("Timepoint::from_unix(env, 0)");
+    expect(helpers).toContain("Duration::from_seconds(env, 0)");
+    expect(helpers).toContain("Bytes::new(env)");
+    expect(helpers).toContain("BytesN::<32>::from_array(env, &[0u8; 32])");
+    expect(helpers).toContain("Vec::<soroban_sdk::Val>::new(env)");
+    expect(helpers).toContain("Map::<soroban_sdk::Val, soroban_sdk::Val>::new(env)");
+    expect(helpers).toContain("Option::<soroban_sdk::Val>::None");
+  });
+
+  it("emits a typed positive string and a different-string rejection", () => {
+    const rust = generateTestCases(withArgs([
+      { name: "memo", type: "string", constraint: { kind: "exact", value: "hello" } },
+    ]));
+    expect(rust).toContain('String::from_str(env, "hello")');
+    expect(rust).toContain("test_enforce_c0_f0_memo_wrong_value");
+    expect(rust).toContain('String::from_str(&env, "__wrong__")');
+  });
+
+  it("chooses a string counterexample outside the whole allowlist", () => {
+    const rust = generateTestCases(withArgs([
+      {
+        name: "memo",
+        type: "string",
+        constraint: { kind: "allowlist", values: ["__wrong__", "__wrong2__"] },
+      },
+    ]));
+    expect(rust).toContain('String::from_str(&env, "__wrong3__")');
+  });
+
+  it("emits at least one rejection for every constraint/type combination it advertises", () => {
+    const types = [
+      "address", "i128", "u128", "i64", "u64", "i32", "u32", "bool", "symbol", "string",
+    ];
+    for (const type of types) {
+      for (const kind of constraintKindsForType(type).filter(kind => kind !== "unconstrained")) {
+        const constraint = kind === "exact" ? { kind, value: type === "address"
+          ? "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+          : type === "bool" ? "true" : type === "symbol" || type === "string" ? "kept" : "10" }
+          : kind === "range" ? { kind, min: "1", max: "10" }
+          : { kind, values: [type === "address"
+            ? "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+            : "kept"] };
+        const schema = withArgs([{ name: "value", type, constraint }]);
+        expect(validateSchema(schema).valid, `${type}/${kind} should validate`).toBe(true);
+        expect(
+          generateTestCases(schema).match(/fn test_enforce_c0_f0_value_(?:wrong_value|exceeds_max|below_min|not_allowlisted|blocked)/g)?.length ?? 0,
+          `${type}/${kind} emitted no rejection test`,
+        ).toBeGreaterThan(0);
+      }
+    }
   });
 });

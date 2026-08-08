@@ -735,6 +735,10 @@ function PolicyBuilder() {
           <p className="text-gray-400">
             Craft signing policies from transaction patterns
           </p>
+          <p className="text-gray-500 text-sm mt-2">
+            A policy adds a new way to authorize transactions, bounded by its limits —
+            it does not restrict the rules your wallet already has.
+          </p>
         </div>
 
         {/* Step Indicator */}

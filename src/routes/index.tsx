@@ -250,7 +250,7 @@ function App() {
                   {isPolicy && (
                     <div className="bg-violet-500/10 border border-violet-500/30 rounded-lg px-3 py-2">
                       <p className="text-xs text-violet-400">
-                        Sends through policy-enforced rule — no passkey needed
+                        Authorizes this transaction under rule #{selectedRuleId}'s limits — no passkey needed
                       </p>
                     </div>
                   )}
