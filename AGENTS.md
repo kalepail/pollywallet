@@ -51,7 +51,7 @@ For the full authoring and tuning rationale see
 ### Cloudflare Sandbox — Policy Testing
 
 - SDK: `@cloudflare/sandbox` (match npm version to Docker image tag)
-- Base image: `docker.io/cloudflare/sandbox:0.12.4` (must match the `@cloudflare/sandbox` npm version)
+- Base image: `docker.io/cloudflare/sandbox:0.12.5` (must match the `@cloudflare/sandbox` npm version)
 - Custom Dockerfile: extend base image, preinstall Rust toolchain + stellar-cli
 - Use WebSocket transport (`SANDBOX_TRANSPORT=websocket`) to avoid subrequest limits
 - Instance types for Rust compilation:

@@ -1,4 +1,4 @@
-FROM docker.io/cloudflare/sandbox:0.12.4
+FROM docker.io/cloudflare/sandbox:0.12.5
 
 # Install build tools and runtime deps for stellar-cli and Rust compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
