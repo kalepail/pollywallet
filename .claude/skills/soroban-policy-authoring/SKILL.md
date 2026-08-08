@@ -1,6 +1,6 @@
 ---
 name: soroban-policy-authoring
-description: Ground truth for writing OpenZeppelin Stellar smart-account policy contracts, and for maintaining the Kimi codegen prompt that generates them. Use when editing src/lib/policy-codegen.ts, src/lib/policy-sandbox.ts, or the generated policy Rust; when a generated policy fails to compile, install, or enforce; or when reviewing whether a policy actually fails closed. Do not use for general Soroban contract work unrelated to smart-account policies.
+description: Ground truth for writing OpenZeppelin Stellar smart-account policy contracts and for maintaining the Kimi codegen prompt that generates them. Use this whenever the task touches src/lib/policy-codegen.ts, src/lib/policy-sandbox.ts, src/lib/policy-schema.ts or generated policy Rust; whenever a policy fails to compile, install, or enforce; whenever a transfer is rejected with (Auth, InvalidAction) or a spending cap behaves as though it were off by orders of magnitude; and whenever reviewing whether a policy actually fails closed. Reach for it even when the report sounds like a wallet, signer, or passkey problem rather than a policy one — install params and unit denominations are the usual culprits and are invisible from the UI. Do not use for general Soroban contract work unrelated to smart-account policies.
 ---
 
 # Soroban smart-account policy authoring
@@ -80,7 +80,32 @@ asset to a `G...` address requires that account to hold a trustline, and fails w
 `Error(Contract, #13) trustline entry is missing`. Contract (`C...`) addresses hold SAC
 balances directly and need none.
 
-## The three things that are easy to get wrong
+## Check assumptions against Stellar Raven, not against memory
+
+Every bug in this file began as something that felt obvious. Stroops felt obvious. The clock
+felt obvious. Training data lags the protocol, and a confident wrong answer about a
+denomination is indistinguishable from a correct one until it reaches a device.
+
+So before writing or changing any rule that encodes a domain fact — a unit, a limit, an error
+code, an ABI shape, a storage durability — spend the one call to confirm it:
+
+* `mcp__stellar-raven__search` to find the right operation, then `mcp__stellar-raven__execute`
+  to run several `stellarDocs.*` queries in one script. `search_asset_token_docs` for
+  token/SAC semantics, `search_soroban_contract_docs` for storage, auth and TTL,
+  `search_docs` for protocol fundamentals.
+* Better still, ask the chain. `decimals()`, `getContractInstance().executable()`, and a
+  read-only `simulateTransaction` settle questions that documentation can only describe.
+  `scripts/inspect-wallet-policies.mts` does this for a live wallet.
+* Cross-check anything surprising against a second source before acting. A Raven hit claimed
+  the account canonicalises `key_data` by stripping the credential-id suffix; the chain showed
+  97-byte entries with the suffix intact. Both were true — the stripping happens in the
+  verifier at signature-check time, not in signer storage — and acting on the first reading
+  alone would have broken sign-in.
+
+This costs one tool call and a few seconds. The units bug cost two live policies and a
+device-level debugging session to find.
+
+## The other things that are easy to get wrong
 
 ### 1. There are TWO context shapes, and the `execute()` wrapper is real
 
@@ -320,3 +345,15 @@ then remove `require_auth` and confirm the auth test fails. Both mutants must be
 3. **Prose mixed into the Rust** → something disabled the `reasoning_content` channel.
    Check for `thinking: false` or `reasoning_effort: "none"`.
 4. **Installs but authorizes everything** → permissive defaults. See §2 above.
+5. **Installs, tests green, then rejects every real transaction** → the install params, not
+   the policy logic. `(Auth, InvalidAction)` names neither the value nor the bound, so read
+   them off the chain rather than reasoning about them:
+
+   ```bash
+   npx tsx .claude/skills/soroban-policy-authoring/scripts/inspect-wallet-policies.mts C...
+   ```
+
+   It prints every rule, its signers, and each policy's stored params — converting bounds
+   into whole tokens using the target's real `decimals()`. A cap reading
+   `max_amount = 100 base units = 0.00001 tokens` is the units bug from the top of this file.
+   `NOT INSTALLED for this account` means `install()` never ran and `enforce()` fails closed.
