@@ -5,6 +5,32 @@ description: Ground truth for writing OpenZeppelin Stellar smart-account policy 
 
 # Soroban smart-account policy authoring
 
+## This file is NOT read by the running service
+
+Editing it changes nothing in production. It is a Claude Code skill: it loads for an agent or
+human working on this repo, and it is not imported by any runtime code, not bundled, and not
+deployed.
+
+**The only thing Kimi ever sees is `buildSystemPrompt()` in `src/lib/policy-codegen.ts`.** To
+change how policies are generated, change that function. To change what a maintainer knows,
+change this file. Usually a real finding belongs in both.
+
+The two are deliberately not identical:
+
+| Belongs in the prompt | Belongs only here |
+|---|---|
+| Facts the model needs to emit correct Rust — the ABI, both context shapes, fail-closed install, storage/TTL/event/error conventions | Facts about the model and the pipeline — reasoning cannot be disabled, caching behaviour, sandbox build-cache numbers, the `mock_all_auths` recording-mode trap |
+
+Checked at the time of writing: every load-bearing prompt fact below is present in the
+rendered prompt. The two that are not — the `<=15 signers / <=5 policies` and `name <=20
+bytes` context-rule limits — are enforced by the smart account when a rule is *created*; a
+policy contract only receives a rule, so it does not need them.
+
+`policy-codegen.test.ts` pins the ones most likely to regress (both context shapes, the
+fail-closed instruction, and the SDK version, which reads from `CARGO_TOML_TEMPLATE` rather
+than a literal). If you add a load-bearing fact to the prompt, pin it there too — otherwise
+nothing stops a future edit from quietly removing it.
+
 Every claim here was verified against the checked-in submodule
 `stellar-contracts/packages/accounts/` and the local clone of `stellar/smart-account-kit`
 on 2026-08-07. **Re-verify after bumping the submodule.** Where a claim is measured against
