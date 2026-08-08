@@ -39,6 +39,47 @@ the live Workers AI endpoint it says so.
 Read this before changing `buildSystemPrompt()`. The prompt is downstream of these facts;
 if the two disagree, the source wins.
 
+## Units are a trust boundary — check them, never assume them
+
+This class of bug shipped and silently bricked two live policies. It is listed first because
+it produces a policy that compiles, passes its generated tests, installs cleanly, and then
+rejects everything — with an error (`Auth, InvalidAction`) that names neither the amount nor
+the bound.
+
+**Token amounts are base units at the contract boundary.** `transfer(from, to, amount)` takes
+`10_000_000` for 1 XLM. A user typing "100" into the Policy Builder meant 100 XLM; installing
+`max_amount = 100` caps at 100 stroops = 0.00001 XLM. Reproduced on a real device: 0.00001 XLM
+passed, 1 XLM failed, same rule, same destination, only the amount differed.
+
+The fix has three parts, and all three are load-bearing:
+
+* `ContractPermission.decimals` is **queried** with `requestTokenDecimals()`, never assumed.
+  7 is near-universal but is a property of the asset, not of Stellar. `null` means "not a
+  token", and amounts pass through as base units.
+* The schema stores base units everywhere. The builder's Min/Max inputs are the only place a
+  human number exists; `toBaseUnits`/`toDisplayUnits` convert at that edge, with string math
+  (float arithmetic puts 0.1 XLM at 1000000.0000000001 stroops).
+* The prompt tells Kimi amounts are pre-scaled on both sides, so it must compare them
+  directly and must never call `decimals()` or scale inside the policy.
+
+**Clocks have the same shape of trap.** `valid_after_ledger`/`valid_until_ledger` are ledger
+sequences, compared against `e.ledger().sequence()` (u32) — never `e.ledger().timestamp()`
+(u64 unix seconds). A live sequence is ~4e6 and a timestamp ~1.79e9, so the wrong clock does
+not drift, it inverts: `timestamp() > valid_until_ledger` is true forever and the policy
+rejects everything. Identical failure signature to the units bug.
+
+**The lesson generalises.** Any value crossing into a contract has a denomination the type
+system does not carry — `i128` says nothing about stroops, `u32` says nothing about ledgers
+vs seconds. Verify each one against live docs or the chain (Stellar Raven MCP,
+`stellarDocs.search_docs`, or just calling `decimals()`), and write the convention into the
+prompt. A wrong unit is indistinguishable from a wrong policy until someone traces it on
+a real device.
+
+Not units, but the same "error names the wrong thing" family: sending a SAC-wrapped classic
+asset to a `G...` address requires that account to hold a trustline, and fails with
+`Error(Contract, #13) trustline entry is missing`. Contract (`C...`) addresses hold SAC
+balances directly and need none.
+
 ## The three things that are easy to get wrong
 
 ### 1. There are TWO context shapes, and the `execute()` wrapper is real

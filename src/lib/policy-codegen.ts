@@ -531,6 +531,25 @@ COMMON MISTAKES TO AVOID:
     If the schema declares anything, a void \`install_params\` must panic.
   * A safe default is only acceptable for genuinely optional configuration, and it must be the
     RESTRICTIVE end of the range, never the permissive one.
+- UNITS: token amounts are BASE UNITS on both sides, always. The \`amount\` argument of
+  \`transfer(from, to, amount)\` is an i128 in the token's smallest unit — 10_000_000 for 1 XLM
+  at 7 decimals — and \`max_amount\`/\`min_amount\` install params are supplied pre-scaled to
+  match. So compare them DIRECTLY: \`if amount > max_amount { panic }\`.
+  * NEVER multiply or divide by 10^decimals inside the policy. NEVER call \`decimals()\` on the
+    token. The scaling already happened before install; doing it again shifts the cap by seven
+    orders of magnitude in whichever direction you guessed.
+  * NEVER treat a bound as a whole-token figure. A policy that reads \`max_amount = 100\` as
+    "100 XLM" and scales it up authorizes 10,000,000x what the user asked for. Reading it as
+    100 base units when the user meant 100 XLM rejects everything they try. Both have shipped.
+  * Do not assume 7 decimals. The policy never needs the decimal count at all — that is
+    precisely why it must not reason about it.
+- CLOCKS: \`valid_after_ledger\` and \`valid_until_ledger\` are LEDGER SEQUENCE NUMBERS. Compare
+  them against \`e.ledger().sequence()\` (u32), NEVER \`e.ledger().timestamp()\` (u64 unix
+  seconds). These are unrelated scales — a live ledger sequence is ~4_000_000 while a unix
+  timestamp is ~1_790_000_000 — so comparing a bound against the wrong clock does not merely
+  drift, it inverts: \`timestamp() > valid_until_ledger\` is true forever, and the policy
+  rejects every transaction it was meant to allow. A testnet ledger is roughly 5 seconds, but
+  do NOT convert between the two; use the one the parameter is named for.
 - Key naming convention: "max_{arg_name}" for a range max, "min_{arg_name}" for a range min,
   "threshold" for a signer threshold, "allowed_{arg_name}" for an allowlist flag. The exact key
   list for this policy is given in the user message — use those names verbatim.

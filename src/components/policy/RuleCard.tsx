@@ -10,7 +10,9 @@ import type {
   GlobalRule,
   GlobalRuleType,
 } from "@/lib/policy-schema";
-import { constraintKindsForType } from "@/lib/policy-schema";
+import {
+  constraintKindsForType, toBaseUnits, toDisplayUnits, isAmountArg,
+} from "@/lib/policy-schema";
 
 // --- Constraint kind labels ---
 
@@ -136,6 +138,7 @@ export default function ContractCard({
         ) : (
           contract.functions.map((func, fi) => (
             <FunctionCard
+              decimals={contract.decimals}
               key={fi}
               func={func}
               onChange={(updated) =>
@@ -168,10 +171,13 @@ function FunctionCard({
   func,
   onChange,
   onRemove,
+  decimals,
 }: {
   func: FunctionPermission;
   onChange: (updated: FunctionPermission) => void;
   onRemove: () => void;
+  /** Token scale for this contract, threaded down so amount inputs can show human units. */
+  decimals?: number;
 }) {
   const [showNote, setShowNote] = useState(!!func.note);
 
@@ -222,6 +228,7 @@ function FunctionCard({
             <ArgRow
               key={ai}
               arg={arg}
+              decimals={decimals}
               onChange={(updated) =>
                 onChange({
                   ...func,
@@ -261,9 +268,11 @@ function FunctionCard({
 function ArgRow({
   arg,
   onChange,
+  decimals,
 }: {
   arg: ArgPermission;
   onChange: (updated: ArgPermission) => void;
+  decimals?: number;
 }) {
   const [showNote, setShowNote] = useState(!!arg.note);
   const validKinds = constraintKindsForType(arg.type);
@@ -338,7 +347,11 @@ function ArgRow({
       )}
 
       {/* Constraint value editor */}
-      <ConstraintEditor constraint={arg.constraint} onChange={(c) => onChange({ ...arg, constraint: c })} />
+      <ConstraintEditor
+        constraint={arg.constraint}
+        onChange={(c) => onChange({ ...arg, constraint: c })}
+        decimals={isAmountArg(arg, decimals) ? decimals : undefined}
+      />
 
       {/* Per-arg note */}
       {showNote && (
@@ -361,9 +374,12 @@ function ArgRow({
 function ConstraintEditor({
   constraint,
   onChange,
+  decimals,
 }: {
   constraint?: ArgConstraint;
   onChange: (c: ArgConstraint) => void;
+  /** Set only for token-amount args. Inputs then take human units and store base units. */
+  decimals?: number;
 }) {
   if (!constraint || constraint.kind === "unconstrained") return null;
 
@@ -377,23 +393,36 @@ function ConstraintEditor({
           onChange={(v) => onChange({ kind: "exact", value: v })}
         />
       );
-    case "range":
+    case "range": {
+      // The schema always stores base units, because that is what the contract compares
+      // against. When we know the token's scale, these two inputs are the ONLY place a human
+      // number is allowed to exist — type 100, install 1000000000. Bounds that fail to parse
+      // are kept verbatim so a half-typed "1." is not silently discarded mid-keystroke.
+      const show = (v?: string) =>
+        v == null ? "" : decimals != null ? toDisplayUnits(v, decimals) : v;
+      const store = (v: string) => {
+        if (!v) return undefined;
+        if (decimals == null) return v;
+        return toBaseUnits(v, decimals) ?? v;
+      };
+      const unit = decimals != null ? ` (whole units, ${decimals} dp)` : "";
       return (
         <div className="flex gap-2">
           <ParamInput
-            label="Min"
+            label={`Min${unit}`}
             placeholder="Optional"
-            value={constraint.min ?? ""}
-            onChange={(v) => onChange({ ...constraint, min: v || undefined })}
+            value={show(constraint.min)}
+            onChange={(v) => onChange({ ...constraint, min: store(v) })}
           />
           <ParamInput
-            label="Max"
+            label={`Max${unit}`}
             placeholder="Optional"
-            value={constraint.max ?? ""}
-            onChange={(v) => onChange({ ...constraint, max: v || undefined })}
+            value={show(constraint.max)}
+            onChange={(v) => onChange({ ...constraint, max: store(v) })}
           />
         </div>
       );
+    }
     case "allowlist":
       return (
         <ParamTextarea

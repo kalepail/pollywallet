@@ -34,7 +34,7 @@ import {
   type GlobalRule,
 } from "@/lib/policy-schema";
 import type { TxPattern } from "@/lib/tx-analyzer";
-import { requestContractSpec } from "@/lib/contract-spec";
+import { requestContractSpec, requestTokenDecimals } from "@/lib/contract-spec";
 import { requestStreamingGeneration, requestFixCode } from "@/lib/policy-codegen";
 import type { StreamStats } from "@/components/policy/CodeEditor";
 import { requestTest, requestCompile } from "@/lib/policy-sandbox";
@@ -199,14 +199,21 @@ function PolicyBuilder() {
       setSpecLoading(true);
       try {
         const results = await Promise.allSettled(
-          addresses.map((addr) => requestContractSpec(addr))
+          addresses.map(async (addr) =>
+            // Decimals rides along with the spec: without it the builder cannot tell a typed
+            // "100" (meaning 100 XLM) from the 100 base units it would otherwise install.
+            Promise.all([requestContractSpec(addr), requestTokenDecimals(addr)])
+          )
         );
         for (const [i, result] of results.entries()) {
-          if (result.status === "fulfilled" && result.value.success && result.value.spec) {
+          if (result.status !== "fulfilled") continue;
+          const [specResult, decimals] = result.value;
+          if (specResult.success && specResult.spec) {
             generated = mergeSpecIntoSchema(
               generated,
               addresses[i],
-              result.value.spec.functions
+              specResult.spec.functions,
+              decimals ?? undefined
             );
           }
         }
@@ -223,9 +230,14 @@ function PolicyBuilder() {
     if (!address) return;
     setSpecLoading(true);
     try {
-      const result = await requestContractSpec(address);
+      const [result, decimals] = await Promise.all([
+        requestContractSpec(address),
+        requestTokenDecimals(address),
+      ]);
       if (result.success && result.spec) {
-        setSchema((prev) => mergeSpecIntoSchema(prev, address, result.spec!.functions));
+        setSchema((prev) =>
+          mergeSpecIntoSchema(prev, address, result.spec!.functions, decimals ?? undefined)
+        );
       }
     } finally {
       setSpecLoading(false);

@@ -1,5 +1,7 @@
-import { xdr, Address, contract } from "@stellar/stellar-sdk";
-import { TESTNET_RPC_URL } from "./constants";
+import {
+  xdr, Address, contract, rpc, Contract, TransactionBuilder, Account, Keypair, scValToNative,
+} from "@stellar/stellar-sdk";
+import { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
 
 // --- Types ---
 
@@ -404,6 +406,40 @@ function validateSpecInput(data: unknown): SpecInput {
     throw new Error("contractAddress must start with C or G");
   }
   return { contractAddress };
+}
+
+/**
+ * Read `decimals()` off a contract, or null if it does not implement it.
+ *
+ * Amount arguments are denominated in base units at the contract boundary, so the policy
+ * builder needs the scale before it can turn a typed "100" into a cap that means what the
+ * user meant. Ask the token rather than assuming 7: that is a property of the asset, not of
+ * Stellar, and assuming it is exactly how a 100-stroop cap shipped as "100 XLM".
+ *
+ * Null is the honest answer for a non-token contract, and callers then treat amounts as
+ * already being base units.
+ */
+export async function requestTokenDecimals(contractAddress: string): Promise<number | null> {
+  try {
+    const { contractAddress: addr } = validateSpecInput({ contractAddress });
+    const server = new rpc.Server(TESTNET_RPC_URL);
+    const tx = new TransactionBuilder(new Account(Keypair.random().publicKey(), "0"), {
+      fee: "100",
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+    })
+      .addOperation(new Contract(addr).call("decimals"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+    if ("error" in sim || !(sim as any).result?.retval) return null;
+    const value = Number(scValToNative((sim as any).result.retval));
+    // A token that reports nonsense is worse than one that reports nothing: silently scaling
+    // by 10^NaN would reintroduce the exact bug this exists to prevent.
+    return Number.isInteger(value) && value >= 0 && value <= 38 ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -7,6 +7,9 @@ import {
   schemaFromJSON,
   emptySchema,
   constraintKindsForType,
+  toBaseUnits,
+  toDisplayUnits,
+  isAmountArg,
   SCHEMA_VERSION,
   type PolicySchema,
   type TxPattern,
@@ -444,5 +447,62 @@ describe("emptySchema", () => {
     const b = emptySchema();
     a.name = "modified";
     expect(b.name).toBe("");
+  });
+});
+
+// The bug this exists to prevent shipped and cost two live wallets their policies: a builder
+// entry of "100" installed max_amount=100, which the contract compares against a base-unit
+// amount, making the cap 0.00001 XLM. Proven on-device: 100 stroops passed, 1 XLM did not.
+describe("token amount unit conversion", () => {
+  it.each([
+    ["1", 7, "10000000"],
+    ["100", 7, "1000000000"],
+    ["0.0000001", 7, "1"],
+    ["0", 7, "0"],
+    ["1.5", 7, "15000000"],
+    ["123456789.1234567", 7, "1234567891234567"],
+    ["1", 0, "1"],
+    ["1", 18, "1000000000000000000"],
+  ])("converts %s at %i decimals to %s base units", (display, decimals, expected) => {
+    expect(toBaseUnits(display, decimals)).toBe(expected);
+  });
+
+  // Float math puts 0.1 XLM at 1000000.0000000001 stroops; string math must not.
+  it("keeps precision that float arithmetic would lose", () => {
+    expect(toBaseUnits("0.1", 7)).toBe("1000000");
+    expect(toBaseUnits("0.3", 7)).toBe("3000000");
+    expect(toBaseUnits("1e21", 7)).toBeNull();
+  });
+
+  it("rejects more precision than the token can express", () => {
+    expect(toBaseUnits("0.00000001", 7)).toBeNull();
+    expect(toBaseUnits("1.5", 0)).toBeNull();
+  });
+
+  it.each(["", " ", "abc", "1.2.3", "--1", "1,000", "0x10"])(
+    "rejects malformed amount %j", (input) => expect(toBaseUnits(input, 7)).toBeNull()
+  );
+
+  it("round-trips through display units", () => {
+    for (const v of ["1", "100", "0.0000001", "1.5", "9999999.9999999"]) {
+      expect(toDisplayUnits(toBaseUnits(v, 7)!, 7)).toBe(v);
+    }
+  });
+
+  it("displays base units without trailing noise", () => {
+    expect(toDisplayUnits("10000000", 7)).toBe("1");
+    expect(toDisplayUnits("1", 7)).toBe("0.0000001");
+    expect(toDisplayUnits("0", 7)).toBe("0");
+    expect(toDisplayUnits("not-a-number", 7)).toBe("not-a-number");
+  });
+
+  // Scaling a non-amount i128, or any arg on a contract that never answered decimals(),
+  // would corrupt the bound just as badly in the other direction.
+  it("only treats i128 args on known-decimals contracts as amounts", () => {
+    const amount = { name: "amount", type: "i128" } as any;
+    expect(isAmountArg(amount, 7)).toBe(true);
+    expect(isAmountArg(amount, undefined)).toBe(false);
+    expect(isAmountArg({ name: "to", type: "address" } as any, 7)).toBe(false);
+    expect(isAmountArg({ name: "id", type: "u32" } as any, 7)).toBe(false);
   });
 });
