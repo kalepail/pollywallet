@@ -22,7 +22,7 @@ const SECP256R1_ORDER = BigInt(
 // --- Testnet contract addresses ---
 // Import + re-export (not `export { } from`) so these are available as local
 // bindings within this module (e.g. as default parameter values).
-import { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
+import { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE, DEPLOYER_SEED_PHRASE } from "./constants";
 export { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE };
 export const TESTNET_ACCOUNT_WASM_HASH =
   "8537b8166c0078440a5324c12f6db48d6340d157c306a54c5ea81405abcc2611";
@@ -61,10 +61,17 @@ export const STROOPS_PER_XLM = 10_000_000;
 // Contract ID uniqueness comes from the salt (hash of credential ID), not the deployer.
 // Only the public key is exported; signing happens server-side in relayer.ts.
 //
-// TODO(mainnet): Replace the deterministic seed with a proper secret loaded
-// from environment variables so the deployer key isn't derivable from source.
+// This key is NOT a secret and must not be treated as one. deriveContractAddress() below
+// mixes this public key into every wallet's contract id, so the browser has to be able to
+// reproduce it. Changing the seed re-derives every address and orphans existing passkeys.
+//
+// TODO(mainnet): do NOT "fix" this by moving the seed to a secret — that alone breaks
+// address derivation. The deployer must first come out of deriveContractAddress() (e.g. a
+// fixed factory contract address instead of a keypair), after which the signing key can
+// become a real secret. That is a migration with an address-compatibility story, not a
+// config change.
 export const DEPLOYER_PUBLIC_KEY = Keypair.fromRawEd25519Seed(
-  hash(Buffer.from("pollywallet")) as Buffer
+  hash(Buffer.from(DEPLOYER_SEED_PHRASE)) as Buffer
 ).publicKey();
 
 // --- Types ---

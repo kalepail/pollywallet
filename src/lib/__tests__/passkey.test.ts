@@ -185,3 +185,23 @@ describe("wallet storage", () => {
     expect(loadWallet()).toBeNull();
   });
 });
+
+// The browser derives DEPLOYER_PUBLIC_KEY and the server derives the signing keypair, both
+// from DEPLOYER_SEED_PHRASE. If those ever diverge, the server signs with a key that is not
+// the transaction's source account and EVERY wallet creation fails — and because this key is
+// also mixed into deriveContractAddress(), changing it orphans existing passkeys. This pins
+// both the shared derivation and the resulting address.
+describe("deployer identity is shared and stable", () => {
+  it("server signing key matches the public key the client derives", async () => {
+    const { Keypair, hash } = await import("@stellar/stellar-sdk");
+    const { DEPLOYER_SEED_PHRASE } = await import("../constants");
+    const serverSide = Keypair.fromRawEd25519Seed(
+      hash(Buffer.from(DEPLOYER_SEED_PHRASE)) as Buffer
+    ).publicKey();
+    expect(serverSide).toBe(DEPLOYER_PUBLIC_KEY);
+  });
+
+  it("pins the deployer address, because wallet addresses derive from it", () => {
+    expect(DEPLOYER_PUBLIC_KEY).toBe("GDWAZVMP6766SAM2HRO6W2QIANU64KUTINIDC5ZQWRS5NAX25CZOHIQV");
+  });
+});
