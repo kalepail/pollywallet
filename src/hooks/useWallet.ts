@@ -167,20 +167,19 @@ export function useWallet() {
 
       setStatus("Preparing deploy...");
 
-      // Simulate + assemble here in the browser. The server function only signs and
-      // submits: local workerd cannot reach soroban-testnet.stellar.org, so keeping
-      // simulation server-side broke wallet creation under `pnpm dev`.
-      let sourceAccount;
-      try {
-        sourceAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
-      } catch {
-        // Fresh testnet (or post-reset): fund the shared deployer once, then retry.
-        await fetch(`${FRIENDBOT_URL}?addr=${DEPLOYER_PUBLIC_KEY}`);
-        sourceAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
-      }
-
-      const unsignedTx = new TransactionBuilder(sourceAccount, {
-        fee: "100",
+      // Simulate here in the browser. The server function only signs and submits: local
+      // workerd cannot reach soroban-testnet.stellar.org, so keeping simulation server-side
+      // broke wallet creation under `pnpm dev`.
+      //
+      // Simulate against a THROWAWAY account, never the deployer. The deployer authorizes the
+      // deployment (its address is in the contract-id preimage) but must not source the
+      // transaction: it is a shared, publicly-derivable account, so any balance it holds is
+      // drainable by anyone and any third-party sequence bump breaks in-flight deploys. The
+      // relayer's channel account pays — see signAndSubmitDeploy. Simulation spends nothing,
+      // and this account is never submitted, so it does not need to exist or be funded.
+      const simAccount = new Account(Keypair.random().publicKey(), "0");
+      const unsignedTx = new TransactionBuilder(simAccount, {
+        fee: "1000000",
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
       })
         .addOperation(deployFunc)
@@ -191,12 +190,16 @@ export function useWallet() {
       if ("error" in deploySim) {
         throw new Error(`Simulation failed: ${(deploySim as any).error}`);
       }
-      const preparedTx = rpc
-        .assembleTransaction(unsignedTx, deploySim as rpc.Api.SimulateTransactionSuccessResponse)
-        .build();
+      const simSuccess = deploySim as rpc.Api.SimulateTransactionSuccessResponse;
 
       setStatus("Deploying via relayer...");
-      const deployResult = await signAndSubmitDeploy({ data: { preparedXdr: preparedTx.toXDR() } });
+      const deployResult = await signAndSubmitDeploy({
+        data: {
+          func: deployFunc.body().invokeHostFunctionOp().hostFunction().toXDR("base64"),
+          auth: (simSuccess.result?.auth ?? []).map((e) => e.toXDR("base64")),
+          validUntilLedger: simSuccess.latestLedger + LEDGERS_PER_HOUR,
+        },
+      });
       if (!deployResult.success) throw new Error(deployResult.error || "Deploy failed");
 
       if (deployResult.hash) {
@@ -481,11 +484,26 @@ export function useWallet() {
       // --- Pass 1: Simulate to get auth entries ---
       setStatus("Simulating transfer...");
 
-      // Use the deployer account (always funded) as simulation source.
-      // Policy transfers need a real account with a valid sequence number.
-      const simAccount = usingPolicyRule
-        ? await server.getAccount(DEPLOYER_PUBLIC_KEY)
-        : new Account(Keypair.random().publicKey(), "0");
+      // SIMULATION SOURCE ONLY — this transaction is never submitted. The real submission
+      // goes through the relayer's channel account (requestSubmitToRelayer), so nothing here
+      // charges the deployer a fee. It is used because a policy transfer needs a source that
+      // actually exists with a valid sequence number to simulate against.
+      //
+      // It does still require the account to EXIST. Wallet deployment used to guarantee that
+      // as a side effect of funding it; it no longer touches the deployer's balance at all,
+      // so re-fund here on demand rather than depending on that. Matters after a testnet
+      // reset, when the account is gone.
+      let simAccount;
+      if (usingPolicyRule) {
+        try {
+          simAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
+        } catch {
+          await fetch(`${FRIENDBOT_URL}?addr=${DEPLOYER_PUBLIC_KEY}`);
+          simAccount = await server.getAccount(DEPLOYER_PUBLIC_KEY);
+        }
+      } else {
+        simAccount = new Account(Keypair.random().publicKey(), "0");
+      }
       const simTx = new TransactionBuilder(simAccount, {
         fee: BASE_FEE,
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,

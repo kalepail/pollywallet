@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TransactionBuilder } from "@stellar/stellar-sdk";
 import { TESTNET_NETWORK_PASSPHRASE } from "../constants";
 
 const channels = vi.hoisted(() => ({
   constructor: vi.fn(),
   submitTransaction: vi.fn(),
+  submitSorobanTransaction: vi.fn(),
 }));
+
+const authz = vi.hoisted(() => ({ authorizeEntry: vi.fn() }));
 
 vi.mock("@tanstack/react-start", () => ({
   createServerFn: () => ({
@@ -33,6 +35,14 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
   return {
     ...actual,
     Keypair: keypair,
+    authorizeEntry: authz.authorizeEntry,
+    xdr: {
+      ...actual.xdr,
+      SorobanAuthorizationEntry: {
+        ...actual.xdr.SorobanAuthorizationEntry,
+        fromXDR: (v: string) => ({ __entry: v }),
+      },
+    },
   };
 });
 
@@ -40,6 +50,7 @@ vi.mock("@openzeppelin/relayer-plugin-channels", () => ({
   ChannelsClient: class {
     constructor(config: unknown) { channels.constructor(config); }
     submitTransaction = channels.submitTransaction;
+    submitSorobanTransaction = channels.submitSorobanTransaction;
   },
 }));
 
@@ -71,81 +82,72 @@ describe("input limits", () => {
     expect(MAX_AUTH_ENTRIES).toBe(10);
   });
 
-  it.each([undefined, null, 3, ""])("rejects invalid preparedXdr %j", async (preparedXdr) => {
-    await expect(signAndSubmitDeploy({ data: { preparedXdr } as any })).rejects.toThrow(
-      "Invalid preparedXdr",
-    );
+  it.each([undefined, null, 3, ""])("rejects invalid func %j", async (func) => {
+    await expect(
+      signAndSubmitDeploy({ data: { func, auth: [], validUntilLedger: 1 } as any }),
+    ).rejects.toThrow("Invalid func");
   });
 
-  it("accepts the exact limit and rejects one byte over", async () => {
-    await expect(signAndSubmitDeploy({ data: { preparedXdr: "x".repeat(MAX_XDR_LENGTH) } }))
-      .resolves.toMatchObject({ error: "Relayer not configured" });
-    await expect(signAndSubmitDeploy({ data: { preparedXdr: "x".repeat(MAX_XDR_LENGTH + 1) } }))
-      .rejects.toThrow("Invalid preparedXdr");
+  it("rejects malformed auth and out-of-range ledgers", async () => {
+    const base = { func: "f", validUntilLedger: 1 };
+    await expect(signAndSubmitDeploy({ data: { ...base, auth: "nope" } as any }))
+      .rejects.toThrow("Invalid auth");
+    await expect(
+      signAndSubmitDeploy({
+        data: { ...base, auth: new Array(MAX_AUTH_ENTRIES + 1).fill("a") } as any,
+      }),
+    ).rejects.toThrow("Invalid auth");
+    await expect(signAndSubmitDeploy({ data: { func: "f", auth: [], validUntilLedger: 0 } as any }))
+      .rejects.toThrow("Invalid validUntilLedger");
+  });
+
+  it("accepts the exact func limit and rejects one byte over", async () => {
+    await expect(
+      signAndSubmitDeploy({
+        data: { func: "x".repeat(MAX_XDR_LENGTH), auth: [], validUntilLedger: 1 },
+      }),
+    ).resolves.toMatchObject({ error: "Relayer not configured" });
+    await expect(
+      signAndSubmitDeploy({
+        data: { func: "x".repeat(MAX_XDR_LENGTH + 1), auth: [], validUntilLedger: 1 },
+      }),
+    ).rejects.toThrow("Invalid func");
   });
 });
 
 describe("deploy submission", () => {
-  it("does not parse or sign when the relayer is unconfigured", async () => {
-    const parse = vi.spyOn(TransactionBuilder, "fromXDR");
-    await expect(signAndSubmitDeploy({ data: { preparedXdr: "prepared" } })).resolves.toEqual({
-      success: false,
-      error: "Relayer not configured",
-      hash: null,
-    });
-    expect(parse).not.toHaveBeenCalled();
+  it("does not sign when the relayer is unconfigured", async () => {
+    await expect(
+      signAndSubmitDeploy({ data: { func: "f", auth: ["a"], validUntilLedger: 9 } }),
+    ).resolves.toEqual({ success: false, error: "Relayer not configured", hash: null });
+    expect(authz.authorizeEntry).not.toHaveBeenCalled();
     expect(channels.constructor).not.toHaveBeenCalled();
   });
 
-  it("signs the parsed testnet transaction and submits its resulting XDR", async () => {
+  // The deployer AUTHORIZES the deployment but must never SOURCE it. submitSorobanTransaction
+  // is the channel-account path, so the relayer pays; submitTransaction would submit our own
+  // envelope and charge whatever account sourced it — which is how the shared, publicly
+  // derivable deployer ended up spending real XLM on fees.
+  it("signs each auth entry and submits via the channel-account path", async () => {
     (globalThis as any).CHANNELS_API_KEY = "global-key";
     (globalThis as any).CHANNELS_BASE_URL = "https://channels.example/testnet";
-    const tx = { sign: vi.fn(), toXDR: vi.fn(() => "signed-xdr") };
-    const parse = vi.spyOn(TransactionBuilder, "fromXDR").mockReturnValue(tx as any);
-    channels.submitTransaction.mockResolvedValue({ hash: "tx-hash" });
+    authz.authorizeEntry.mockImplementation(async (entry: any) => ({
+      toXDR: () => `signed:${entry.__entry}`,
+    }));
+    channels.submitSorobanTransaction.mockResolvedValue({ hash: "tx-hash" });
 
-    await expect(signAndSubmitDeploy({ data: { preparedXdr: "prepared-xdr" } })).resolves.toEqual({
-      success: true,
-      error: null,
-      hash: "tx-hash",
-    });
-    expect(parse).toHaveBeenCalledWith("prepared-xdr", TESTNET_NETWORK_PASSPHRASE);
-    expect(tx.sign).toHaveBeenCalledOnce();
-    expect(tx.toXDR).toHaveBeenCalledOnce();
-    expect(channels.constructor).toHaveBeenCalledWith({
-      baseUrl: "https://channels.example/testnet",
-      apiKey: "global-key",
-    });
-    expect(channels.submitTransaction).toHaveBeenCalledWith({ xdr: "signed-xdr" });
-  });
+    await expect(
+      signAndSubmitDeploy({ data: { func: "func-xdr", auth: ["e1", "e2"], validUntilLedger: 42 } }),
+    ).resolves.toEqual({ success: true, error: null, hash: "tx-hash" });
 
-  it("uses process configuration and preserves a null response hash", async () => {
-    process.env.CHANNELS_API_KEY = "process-key";
-    const tx = { sign: vi.fn(), toXDR: vi.fn(() => "signed-xdr") };
-    vi.spyOn(TransactionBuilder, "fromXDR").mockReturnValue(tx as any);
-    channels.submitTransaction.mockResolvedValue({});
-
-    await expect(signAndSubmitDeploy({ data: { preparedXdr: "prepared" } })).resolves.toEqual({
-      success: true,
-      error: null,
-      hash: null,
+    expect(authz.authorizeEntry).toHaveBeenCalledTimes(2);
+    expect(authz.authorizeEntry.mock.calls[0][2]).toBe(42);
+    expect(authz.authorizeEntry.mock.calls[0][3]).toBe(TESTNET_NETWORK_PASSPHRASE);
+    expect(channels.submitSorobanTransaction).toHaveBeenCalledWith({
+      func: "func-xdr",
+      auth: ["signed:e1", "signed:e2"],
     });
-    expect(channels.constructor).toHaveBeenCalledWith({
-      baseUrl: "https://channels.openzeppelin.com/testnet",
-      apiKey: "process-key",
-    });
-  });
-
-  it("maps SDK and relayer errors without leaking a success result", async () => {
-    process.env.CHANNELS_API_KEY = "key";
-    vi.spyOn(TransactionBuilder, "fromXDR").mockImplementation(() => {
-      throw new Error("malformed XDR");
-    });
-
-    await expect(signAndSubmitDeploy({ data: { preparedXdr: "bad" } })).resolves.toEqual({
-      success: false,
-      error: "malformed XDR",
-      hash: null,
-    });
+    // The fee-charging path must not be used.
+    expect(channels.submitTransaction).not.toHaveBeenCalled();
   });
 });

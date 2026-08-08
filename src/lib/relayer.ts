@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { ChannelsClient } from "@openzeppelin/relayer-plugin-channels";
-import { Keypair, TransactionBuilder, hash } from "@stellar/stellar-sdk";
+import { Keypair, hash, authorizeEntry, xdr } from "@stellar/stellar-sdk";
 import { Buffer } from "buffer";
 import { TESTNET_NETWORK_PASSPHRASE, DEPLOYER_SEED_PHRASE } from "./constants";
 
@@ -50,18 +50,42 @@ function getDeployerKeypair(): Keypair {
 }
 
 /**
- * Sign a already-simulated deploy transaction with the deployer key and submit it.
+ * Authorize a wallet deployment with the deployer key and submit it via a channel account.
  *
- * The caller passes a transaction that has ALREADY been simulated and assembled
- * client-side. Simulation deliberately does not happen here: local workerd cannot
- * reach `soroban-testnet.stellar.org` (it fails with "internal error; reference = ..."),
- * which broke wallet creation under `pnpm dev`. The browser reaches the RPC fine, so
- * simulation lives there and the server only does what needs the secret — signing.
+ * The deployer AUTHORIZES the deployment but must never PAY for it. Its address is baked into
+ * every wallet's contract id (see DEPLOYER_SEED_PHRASE), so it is a permanent, shared,
+ * publicly-derivable account — anything it funds is drainable by anyone, and any sequence
+ * bump by a third party breaks in-flight deploys.
+ *
+ * This previously built the transaction with the deployer as SOURCE account and submitted the
+ * signed envelope through `submitTransaction({ xdr })`, which pays fees from the source. That
+ * was measurable on-chain: the deployer had spent ~1 XLM in fee_charged across wallet
+ * creations. Now the host function plus deployer-signed auth entries go through
+ * `submitSorobanTransaction({ func, auth })`, which the plugin documents as using channel
+ * accounts — so the relayer's channel account is the source and the fee payer.
+ *
+ * Contract addresses are unaffected: the id derives from
+ * ContractIdPreimageFromAddress{address, salt} inside the host function, not from the
+ * transaction's source account. The `address` there is still the deployer.
+ *
+ * Simulation stays in the browser: local workerd cannot reach soroban-testnet.stellar.org
+ * (it fails with "internal error; reference = ..."), which broke wallet creation under
+ * `pnpm dev`. The server only does what needs the key — signing.
  */
 export const signAndSubmitDeploy = createServerFn({ method: "POST" })
-  .inputValidator((data: { preparedXdr: string }) => {
-    if (typeof data?.preparedXdr !== "string" || data.preparedXdr.length === 0 || data.preparedXdr.length > MAX_XDR_LENGTH) {
-      throw new Error("Invalid preparedXdr");
+  .inputValidator((data: { func: string; auth: string[]; validUntilLedger: number }) => {
+    if (typeof data?.func !== "string" || !data.func || data.func.length > MAX_XDR_LENGTH) {
+      throw new Error("Invalid func");
+    }
+    if (
+      !Array.isArray(data?.auth) ||
+      data.auth.length > MAX_AUTH_ENTRIES ||
+      !data.auth.every((a) => typeof a === "string" && a.length <= MAX_XDR_LENGTH)
+    ) {
+      throw new Error(`Invalid auth: expected up to ${MAX_AUTH_ENTRIES} XDR strings`);
+    }
+    if (!Number.isInteger(data?.validUntilLedger) || data.validUntilLedger <= 0) {
+      throw new Error("Invalid validUntilLedger");
     }
     return data;
   })
@@ -72,10 +96,22 @@ export const signAndSubmitDeploy = createServerFn({ method: "POST" })
         return { success: false as const, error: "Relayer not configured", hash: null };
       }
 
-      const tx = TransactionBuilder.fromXDR(data.preparedXdr, TESTNET_NETWORK_PASSPHRASE);
-      tx.sign(getDeployerKeypair());
+      const deployer = getDeployerKeypair();
+      const signed = await Promise.all(
+        data.auth.map((entryXdr) =>
+          authorizeEntry(
+            xdr.SorobanAuthorizationEntry.fromXDR(entryXdr, "base64"),
+            deployer,
+            data.validUntilLedger,
+            TESTNET_NETWORK_PASSPHRASE
+          )
+        )
+      );
 
-      const result = await client.submitTransaction({ xdr: tx.toXDR() });
+      const result = await client.submitSorobanTransaction({
+        func: data.func,
+        auth: signed.map((e) => e.toXDR("base64")),
+      });
       return { success: true as const, error: null, hash: result.hash ?? null };
     } catch (err: any) {
       return { success: false as const, error: err.message || "Deploy failed", hash: null };
