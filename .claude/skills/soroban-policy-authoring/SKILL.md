@@ -117,6 +117,23 @@ code, an ABI shape, a storage durability — spend the one call to confirm it:
 This costs one tool call and a few seconds. The units bug cost two live policies and a
 device-level debugging session to find.
 
+## Accepted risks
+
+Recorded so they read as decisions rather than oversights. Re-open them before mainnet.
+
+* **`streamPolicyCode` is public and unauthenticated.** Any visitor can drive a policy
+  generation, which spends Workers AI budget, sandbox container CPU, and — since the Raven
+  research phase — calls a third-party MCP server on the owner's API key. Two independent
+  reviewers rated this DO NOT SHIP. Accepted deliberately for testnet: the blast radius is
+  spend and a possible Raven rate-limit, not key disclosure (the secret never reaches the
+  client bundle or the stream) and not user funds. Rate limiting or an auth gate is the fix
+  when this stops being a testnet toy.
+
+* **Raven tool calls are uncapped per generation.** Bounded only by
+  `RAVEN_RESEARCH_MAX_ROUNDS` model turns, not by call count. Deliberate — Raven is
+  self-hosted and free to the owner. `RAVEN_REQUEST_TIMEOUT_MS` bounds the failure mode that
+  actually mattered, which was a stalled request hanging a generation.
+
 ## The other things that are easy to get wrong
 
 ### 1. There are TWO context shapes, and the `execute()` wrapper is real

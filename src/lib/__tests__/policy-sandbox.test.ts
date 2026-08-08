@@ -362,3 +362,65 @@ describe("acceptance tests exercise a real in-range value", () => {
     expect(rust).toMatch(/\(-1i128\)/);
   });
 });
+
+// A time window is only enforced if calls OUTSIDE it are rejected. The suite previously
+// generated only test_enforce_within_time_window, which cannot detect the CLOCKS bug at all:
+// Env::default() leaves timestamp() at 0, so a policy comparing timestamp() against
+// valid_until_ledger sees 0 > N, accepts, and passes. Moving the ledger SEQUENCE outside the
+// window is what separates a sequence-based policy from a timestamp-confused one.
+describe("time-lock windows are tested at both edges", () => {
+  const withWindow = (params: Record<string, number>): any => ({
+    $schema: "pollywallet-policy/v0",
+    name: "window",
+    description: "window fixture",
+    globalRules: [{ type: "time_lock", params }],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "transfer", args: [{ name: "amount", type: "i128" }] }],
+    }],
+  });
+
+  it("rejects a call past valid_until_ledger", () => {
+    const rust = generateTestCases(withWindow({ validAfterLedger: 100, validUntilLedger: 5000 }));
+    expect(rust).toContain("fn test_enforce_after_window_is_rejected");
+    expect(rust).toContain("sequence_number = 5001");
+    expect(rust).toContain("try_enforce");
+  });
+
+  it("rejects a call before valid_after_ledger", () => {
+    const rust = generateTestCases(withWindow({ validAfterLedger: 100, validUntilLedger: 5000 }));
+    expect(rust).toContain("fn test_enforce_before_window_is_rejected");
+    expect(rust).toContain("sequence_number = 99");
+  });
+
+  // The failure message has to name the likely cause, because "enforce accepted a call" alone
+  // sends the reader looking at the window logic rather than at which clock was read.
+  it("names the wrong-clock hypothesis in the assertion message", () => {
+    const rust = generateTestCases(withWindow({ validUntilLedger: 5000 }));
+    expect(rust).toMatch(/ledger\(\)\.timestamp\(\).*instead of.*ledger\(\)\.sequence\(\)/s);
+  });
+
+  it("emits only the applicable edge when one bound is open", () => {
+    const onlyUntil = generateTestCases(withWindow({ validUntilLedger: 5000 }));
+    expect(onlyUntil).toContain("fn test_enforce_after_window_is_rejected");
+    expect(onlyUntil).not.toContain("fn test_enforce_before_window_is_rejected");
+
+    const onlyAfter = generateTestCases(withWindow({ validAfterLedger: 100 }));
+    expect(onlyAfter).toContain("fn test_enforce_before_window_is_rejected");
+    expect(onlyAfter).not.toContain("fn test_enforce_after_window_is_rejected");
+  });
+
+  it("still keeps the positive in-window test", () => {
+    const rust = generateTestCases(withWindow({ validAfterLedger: 100, validUntilLedger: 5000 }));
+    expect(rust).toContain("fn test_enforce_within_time_window");
+  });
+
+  it("adds nothing when the schema declares no window", () => {
+    const rust = generateTestCases({
+      $schema: "pollywallet-policy/v0", name: "n", description: "d", globalRules: [],
+      contracts: [{ address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        functions: [{ name: "transfer", args: [] }] }],
+    } as any);
+    expect(rust).not.toContain("window_is_rejected");
+  });
+});

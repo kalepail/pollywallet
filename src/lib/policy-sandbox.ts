@@ -508,7 +508,68 @@ fn test_enforce_insufficient_signers() {
 }`);
         break;
 
-      case "time_lock":
+      case "time_lock": {
+        // A window is only enforced if calls OUTSIDE it are rejected. The positive test alone
+        // cannot show that, and worse, it cannot distinguish a policy reading the wrong clock:
+        // `Env::default()` leaves timestamp() at 0, so a policy comparing
+        // `timestamp() > valid_until_ledger` sees 0 > N, accepts, and passes. Moving the LEDGER
+        // SEQUENCE outside the window separates them — a sequence-based policy rejects, while a
+        // timestamp-confused one still sees 0 and accepts, failing this test loudly.
+        const after = rule.params.validAfterLedger;
+        const until = rule.params.validUntilLedger;
+
+        if (until != null) {
+          tests.push(`
+#[test]
+fn test_enforce_after_window_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    // Positive control inside the window, so a failure below is about the ledger and not setup.
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    env.ledger().with_mut(|l| l.sequence_number = ${until + 1});
+    let context = create_function_context(&env, build_default_args(&env));
+    assert!(
+        client.try_enforce(&context, &fixture_signers(&env), &context_rule, &smart_account).is_err(),
+        "enforce() accepted a call at ledger ${until + 1}, past valid_until_ledger ${until} — \
+the window is unenforced, or the policy is comparing ledger().timestamp() (0 in tests) \
+instead of ledger().sequence()"
+    );
+}`);
+        }
+
+        if (after != null && after > 0) {
+          tests.push(`
+#[test]
+fn test_enforce_before_window_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    env.ledger().with_mut(|l| l.sequence_number = ${Math.max(0, after - 1)});
+    let context = create_function_context(&env, build_default_args(&env));
+    assert!(
+        client.try_enforce(&context, &fixture_signers(&env), &context_rule, &smart_account).is_err(),
+        "enforce() accepted a call at ledger ${Math.max(0, after - 1)}, before valid_after_ledger ${after} — \
+the window is unenforced, or the policy is reading the wrong clock"
+    );
+}`);
+        }
+
         tests.push(`
 #[test]
 fn test_enforce_within_time_window() {
@@ -526,6 +587,7 @@ fn test_enforce_within_time_window() {
     client.enforce(&context, &signers, &context_rule, &smart_account);
 }`);
         break;
+      }
 
       case "weighted_threshold":
         tests.push(`
