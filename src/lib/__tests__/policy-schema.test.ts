@@ -7,9 +7,7 @@ import {
   schemaFromJSON,
   emptySchema,
   constraintKindsForType,
-  toBaseUnits,
   toDisplayUnits,
-  isAmountArg,
   SCHEMA_VERSION,
   type PolicySchema,
   type TxPattern,
@@ -450,60 +448,41 @@ describe("emptySchema", () => {
   });
 });
 
-// The bug this exists to prevent shipped and cost two live wallets their policies: a builder
-// entry of "100" installed max_amount=100, which the contract compares against a base-unit
-// amount, making the cap 0.00001 XLM. Proven on-device: 100 stroops passed, 1 XLM did not.
-describe("token amount unit conversion", () => {
+// Constraint values are base units — exactly what the contract compares — and are stored as
+// typed. An earlier revision converted whole tokens to base units in the builder, which meant
+// deciding that an i128 was a token amount. That is not knowable from a contract spec: a
+// deadline, id, price or ratio would have been silently multiplied by 10^decimals. Units are a
+// property of an argument's meaning, so the UI states them instead of inferring them, and
+// toDisplayUnits exists only to render a hint beside the field.
+describe("base-unit display helper", () => {
   it.each([
-    ["1", 7, "10000000"],
-    ["100", 7, "1000000000"],
-    ["0.0000001", 7, "1"],
+    ["10000000", 7, "1"],
+    ["1000000000", 7, "100"],
+    ["1", 7, "0.0000001"],
+    ["15000000", 7, "1.5"],
     ["0", 7, "0"],
-    ["1.5", 7, "15000000"],
-    ["123456789.1234567", 7, "1234567891234567"],
     ["1", 0, "1"],
-    ["1", 18, "1000000000000000000"],
-  ])("converts %s at %i decimals to %s base units", (display, decimals, expected) => {
-    expect(toBaseUnits(display, decimals)).toBe(expected);
+    ["1000000000000000000", 18, "1"],
+  ])("renders %s at %i decimals as %s", (base, decimals, expected) => {
+    expect(toDisplayUnits(base, decimals)).toBe(expected);
   });
 
-  // Float math puts 0.1 XLM at 1000000.0000000001 stroops; string math must not.
+  // Beyond Number.MAX_SAFE_INTEGER, and exactly where float math would drift.
   it("keeps precision that float arithmetic would lose", () => {
-    expect(toBaseUnits("0.1", 7)).toBe("1000000");
-    expect(toBaseUnits("0.3", 7)).toBe("3000000");
-    expect(toBaseUnits("1e21", 7)).toBeNull();
+    expect(toDisplayUnits("90071992547409930000001", 7)).toBe("9007199254740993.0000001");
+    expect(toDisplayUnits("1000000", 7)).toBe("0.1");
+    expect(toDisplayUnits("3000000", 7)).toBe("0.3");
   });
 
-  it("rejects more precision than the token can express", () => {
-    expect(toBaseUnits("0.00000001", 7)).toBeNull();
-    expect(toBaseUnits("1.5", 0)).toBeNull();
-  });
-
-  it.each(["", " ", "abc", "1.2.3", "--1", "1,000", "0x10"])(
-    "rejects malformed amount %j", (input) => expect(toBaseUnits(input, 7)).toBeNull()
+  // A hint must never mangle a value it cannot interpret; it returns the input untouched.
+  it.each(["", "abc", "1.5", "0x10", "1e9", " "])(
+    "passes non-integer input through unchanged: %j",
+    (input) => expect(toDisplayUnits(input, 7)).toBe(input)
   );
 
-  it("round-trips through display units", () => {
-    for (const v of ["1", "100", "0.0000001", "1.5", "9999999.9999999"]) {
-      expect(toDisplayUnits(toBaseUnits(v, 7)!, 7)).toBe(v);
-    }
-  });
-
-  it("displays base units without trailing noise", () => {
-    expect(toDisplayUnits("10000000", 7)).toBe("1");
-    expect(toDisplayUnits("1", 7)).toBe("0.0000001");
-    expect(toDisplayUnits("0", 7)).toBe("0");
-    expect(toDisplayUnits("not-a-number", 7)).toBe("not-a-number");
-  });
-
-  // Scaling a non-amount i128, or any arg on a contract that never answered decimals(),
-  // would corrupt the bound just as badly in the other direction.
-  it("only treats i128 args on known-decimals contracts as amounts", () => {
-    const amount = { name: "amount", type: "i128" } as any;
-    expect(isAmountArg(amount, 7)).toBe(true);
-    expect(isAmountArg(amount, undefined)).toBe(false);
-    expect(isAmountArg({ name: "to", type: "address" } as any, 7)).toBe(false);
-    expect(isAmountArg({ name: "id", type: "u32" } as any, 7)).toBe(false);
+  it("handles negatives without losing the sign", () => {
+    expect(toDisplayUnits("-10000000", 7)).toBe("-1");
+    expect(toDisplayUnits("-1", 7)).toBe("-0.0000001");
   });
 });
 
@@ -542,5 +521,45 @@ describe("colliding install param keys", () => {
     const schema = build("1000000000", "1000000000");
     schema.contracts[0].functions = [schema.contracts[0].functions[0]];
     expect(validateSchema(schema).valid).toBe(true);
+  });
+});
+
+// Bounds reach BigInt() at deploy and `${value}i128` in generated Rust. Garbage there fails
+// opaquely and far from the cause, so it is rejected where the field is defined.
+describe("numeric bound validation", () => {
+  const withRange = (min: string | undefined, max: string | undefined): PolicySchema => ({
+    $schema: SCHEMA_VERSION,
+    name: "bounds",
+    description: "bounds fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "transfer", args: [{ name: "amount", type: "i128", constraint: { kind: "range", min, max } }] }],
+    }],
+  } as PolicySchema);
+
+  it("accepts whole base-unit numbers, including negatives and huge values", () => {
+    expect(validateSchema(withRange(undefined, "1000000000")).valid).toBe(true);
+    expect(validateSchema(withRange("-1", "0")).valid).toBe(true);
+    expect(validateSchema(withRange(undefined, "170141183460469231731687303715884105727")).valid).toBe(true);
+  });
+
+  it.each(["1.5", "1e9", "abc", "0x10", "1,000", " ", "100 XLM"])(
+    "rejects a non-integer bound: %j",
+    (bad) => {
+      const result = validateSchema(withRange(undefined, bad));
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toMatch(/whole number in base units/);
+    }
+  );
+
+  it("rejects an inverted range", () => {
+    const result = validateSchema(withRange("100", "10"));
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/greater than max/);
+  });
+
+  it("still requires at least one bound", () => {
+    expect(validateSchema(withRange(undefined, undefined)).valid).toBe(false);
   });
 });

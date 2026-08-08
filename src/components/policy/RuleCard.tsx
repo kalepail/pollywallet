@@ -11,7 +11,7 @@ import type {
   GlobalRuleType,
 } from "@/lib/policy-schema";
 import {
-  constraintKindsForType, toBaseUnits, toDisplayUnits, isAmountArg,
+  constraintKindsForType, toDisplayUnits,
 } from "@/lib/policy-schema";
 
 // --- Constraint kind labels ---
@@ -350,7 +350,7 @@ function ArgRow({
       <ConstraintEditor
         constraint={arg.constraint}
         onChange={(c) => onChange({ ...arg, constraint: c })}
-        decimals={isAmountArg(arg, decimals) ? decimals : undefined}
+        decimals={decimals}
       />
 
       {/* Per-arg note */}
@@ -372,47 +372,52 @@ function ArgRow({
 // ============================================================
 
 /**
- * A number field that shows human units while the schema stores base units.
+ * A numeric constraint field. The value IS what the contract compares — base units, raw — and
+ * is stored exactly as typed.
  *
- * It has to keep its own draft text. Converting on every keystroke round-trips the value
- * through toBaseUnits/toDisplayUnits, and "1." normalises straight back to "1" — so the
- * decimal point vanishes as you type it and a fraction can never be entered at all. The draft
- * holds exactly what was typed; the schema only sees a value once it parses.
+ * It deliberately does not convert. An earlier revision took whole tokens and multiplied by
+ * 10^decimals, which requires knowing that an argument is a token amount; a policy can
+ * constrain any argument of any contract, so an i128 deadline, id or ratio would have been
+ * silently scaled by ten million. Units live in an argument's meaning, not its type, and the
+ * spec does not carry meaning — so the builder states the unit instead of guessing it.
+ *
+ * When the contract answered decimals(), a derived hint shows what the number would be as a
+ * token amount. It is read-only and never written back: its whole job is to make "100" visibly
+ * 0.00001 XLM at the moment someone means 100 XLM.
  */
-function AmountInput({
+function NumericInput({
   label,
   placeholder,
-  base,
+  value,
   decimals,
   onChange,
 }: {
   label: string;
   placeholder?: string;
-  base?: string;
+  value?: string;
   decimals?: number;
-  onChange: (base: string | undefined) => void;
+  onChange: (value: string | undefined) => void;
 }) {
-  const display = base == null ? "" : decimals != null ? toDisplayUnits(base, decimals) : base;
-  const [draft, setDraft] = useState<string | null>(null);
-  // Show the draft while typing; otherwise reflect the schema, so an external change lands.
-  const value = draft ?? display;
-
+  const isInteger = value != null && value !== "" && /^-?\d+$/.test(value.trim());
   return (
-    <ParamInput
-      label={label}
-      placeholder={placeholder}
-      value={value}
-      onChange={(typed) => {
-        setDraft(typed);
-        if (!typed) return onChange(undefined);
-        if (decimals == null) return onChange(typed);
-        const converted = toBaseUnits(typed, decimals);
-        // Mid-edit text like "1." or "0." is not yet a number. Hold the draft and leave the
-        // stored value alone rather than writing an unparseable string into the schema.
-        if (converted != null) onChange(converted);
-      }}
-      onBlur={() => setDraft(null)}
-    />
+    <div className="flex-1">
+      <ParamInput
+        label={label}
+        placeholder={placeholder}
+        value={value ?? ""}
+        onChange={(typed) => onChange(typed || undefined)}
+      />
+      {decimals != null && isInteger && (
+        <p className="mt-1 text-[11px] text-gray-500">
+          = {toDisplayUnits(value!.trim(), decimals)} if this is a token amount
+        </p>
+      )}
+      {value != null && value !== "" && !isInteger && (
+        <p className="mt-1 text-[11px] text-amber-400">
+          Must be a whole number in base units
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -423,43 +428,39 @@ function ConstraintEditor({
 }: {
   constraint?: ArgConstraint;
   onChange: (c: ArgConstraint) => void;
-  /** Set only for token-amount args. Inputs then take human units and store base units. */
+  /** decimals() for this contract, if it answered. Display hint only — never a conversion. */
   decimals?: number;
 }) {
   if (!constraint || constraint.kind === "unconstrained") return null;
 
+  // Numeric bounds are compared against the raw argument, so they are always base units.
+  const unit = " (base units)";
+
   switch (constraint.kind) {
     case "exact":
-      // An exact bound is compared against the same base-unit argument a range is, so it needs
-      // the identical conversion. Left raw, "exact 100" installs 100 stroops — the original bug
-      // wearing a different constraint kind.
       return (
-        <AmountInput
-          label={decimals != null ? `Value (whole units, ${decimals} dp)` : "Value"}
+        <NumericInput
+          label={`Value${unit}`}
           placeholder="Exact value to match"
-          base={constraint.value}
+          value={constraint.value}
           decimals={decimals}
           onChange={(v) => onChange({ kind: "exact", value: v ?? "" })}
         />
       );
     case "range": {
-      // The schema always stores base units, because that is what the contract compares
-      // against. When we know the token's scale, these inputs are the ONLY place a human
-      // number is allowed to exist — type 100, install 1000000000.
-      const unit = decimals != null ? ` (whole units, ${decimals} dp)` : "";
       return (
         <div className="flex gap-2">
-          <AmountInput
+          <NumericInput
             label={`Min${unit}`}
             placeholder="Optional"
-            base={constraint.min}
+            value={constraint.min}
             decimals={decimals}
             onChange={(v) => onChange({ ...constraint, min: v })}
           />
-          <AmountInput
+          <NumericInput
             label={`Max${unit}`}
             placeholder="Optional"
-            base={constraint.max}
+            value={constraint.max}
             decimals={decimals}
             onChange={(v) => onChange({ ...constraint, max: v })}
           />

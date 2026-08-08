@@ -60,62 +60,40 @@ export interface ContractPermission {
   /** Allowed functions on this contract. Unlisted functions are rejected. */
   functions: FunctionPermission[];
   /**
-   * Result of calling `decimals()` on this contract, when it is a token.
+   * Result of calling `decimals()` on this contract, when it answers. DISPLAY ONLY.
    *
-   * Amount arguments cross the contract boundary in BASE UNITS: `transfer(from, to, amount)`
-   * takes 10_000_000 for 1 XLM, not 1. Without this, a "max 100" typed in the builder installs
-   * a 100-stroop cap — 0.00001 XLM — and every real transfer is rejected. That shipped, and
-   * cost two live wallets their policies until it was traced on-device.
+   * Constraint values are always base units — what the contract actually compares — and this
+   * never changes what is stored. It exists so the builder can show "1000000000" alongside
+   * "= 100.0000000", which is what makes a mis-scaled bound visible at the moment it is typed.
    *
-   * Queried, never assumed: 7 is overwhelmingly common but is a property of the token, not of
-   * Stellar. Undefined means "not a token / not known", and amounts are then passed through
-   * verbatim as base units.
+   * An earlier revision used this to CONVERT typed values, treating every i128 on a contract
+   * with decimals as a token amount. That is not knowable in general: a policy may constrain
+   * any argument of any contract, and an i128 deadline, id, price or ratio would have been
+   * silently multiplied by 10^decimals — the same ten-million-fold error the conversion was
+   * added to prevent, just pointing the other way. Units are a property of an argument's
+   * meaning, which the contract spec does not carry, so the builder no longer guesses.
+   *
+   * Queried, never assumed: 7 is near-universal but is a property of the asset, not of Stellar.
    */
   decimals?: number;
 }
 
-/** 10^decimals, as a bigint, for converting between display and base units. */
-function unitScale(decimals: number): bigint {
-  return 10n ** BigInt(decimals);
-}
-
 /**
- * Convert a human-typed decimal amount ("1.5") into base units ("15000000" at 7 decimals).
+ * Render a base-unit integer in whole tokens, for DISPLAY ONLY.
  *
- * String math, never floats: 0.1 XLM through `Number` arithmetic lands on 1000000.0000000001
- * stroops. Returns null when the input is not a well-formed decimal or carries more precision
- * than the token can express, so callers can surface that instead of silently truncating.
+ * Nothing derived from this is ever stored. Constraint values are always base units, exactly
+ * as the contract compares them, so this only exists to make a typed number legible: 1000000000
+ * beside "= 100.0000000". String math, never floats — Number arithmetic puts 0.1 XLM at
+ * 1000000.0000000001 stroops.
  */
-export function toBaseUnits(display: string, decimals: number): string | null {
-  const trimmed = display.trim();
-  const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(trimmed);
-  if (!m) return null;
-  const [, sign, whole, frac = ""] = m;
-  if (frac.length > decimals) return null;
-  const digits = whole + frac.padEnd(decimals, "0");
-  return `${sign}${BigInt(digits)}`;
-}
-
-/** Inverse of toBaseUnits, for redisplaying a stored schema. Trailing zeros trimmed. */
 export function toDisplayUnits(base: string, decimals: number): string {
   const trimmed = base.trim();
   if (!/^-?\d+$/.test(trimmed)) return base;
   const negative = trimmed.startsWith("-");
   const magnitude = BigInt(negative ? trimmed.slice(1) : trimmed);
-  const scale = unitScale(decimals);
+  const scale = 10n ** BigInt(decimals);
   const frac = (magnitude % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
   return `${negative ? "-" : ""}${magnitude / scale}${frac ? `.${frac}` : ""}`;
-}
-
-/**
- * Whether this argument carries a token amount, and so needs unit conversion.
- *
- * Deliberately narrow: an i128 on a token contract is nearly always an amount, but `decimals`
- * is only set for contracts that actually answered `decimals()`, so non-token contracts never
- * reach here and a non-amount i128 on a token contract is rare enough to accept.
- */
-export function isAmountArg(arg: ArgPermission, decimals?: number): boolean {
-  return decimals != null && arg.type.toLowerCase() === "i128";
 }
 
 /** Function-level permission with per-arg constraints and notes. */
@@ -353,6 +331,23 @@ function validateConstraint(constraint: ArgConstraint, prefix: string): string[]
     case "range": {
       if (constraint.min == null && constraint.max == null) {
         errors.push(`${prefix}: range constraint requires at least min or max`);
+        break;
+      }
+      // Bounds are base-unit integers. Anything else fails far away and opaquely: BigInt()
+      // throws while building install params at deploy, and the generated tests interpolate
+      // it as `${value}i128`, so the crate fails to compile for reasons that name neither the
+      // schema nor the field.
+      for (const [name, bound] of [["min", constraint.min], ["max", constraint.max]] as const) {
+        if (bound != null && !/^-?\d+$/.test(String(bound).trim())) {
+          errors.push(`${prefix}: range ${name} must be a whole number in base units, got "${bound}"`);
+        }
+      }
+      if (
+        constraint.min != null && constraint.max != null &&
+        /^-?\d+$/.test(String(constraint.min).trim()) && /^-?\d+$/.test(String(constraint.max).trim()) &&
+        BigInt(String(constraint.min).trim()) > BigInt(String(constraint.max).trim())
+      ) {
+        errors.push(`${prefix}: range min (${constraint.min}) is greater than max (${constraint.max})`);
       }
       break;
     }

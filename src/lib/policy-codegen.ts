@@ -531,18 +531,19 @@ COMMON MISTAKES TO AVOID:
     If the schema declares anything, a void \`install_params\` must panic.
   * A safe default is only acceptable for genuinely optional configuration, and it must be the
     RESTRICTIVE end of the range, never the permissive one.
-- UNITS: token amounts are BASE UNITS on both sides, always. The \`amount\` argument of
-  \`transfer(from, to, amount)\` is an i128 in the token's smallest unit — 10_000_000 for 1 XLM
-  at 7 decimals — and \`max_amount\`/\`min_amount\` install params are supplied pre-scaled to
-  match. So compare them DIRECTLY: \`if amount > max_amount { panic }\`.
-  * NEVER multiply or divide by 10^decimals inside the policy. NEVER call \`decimals()\` on the
-    token. The scaling already happened before install; doing it again shifts the cap by seven
-    orders of magnitude in whichever direction you guessed.
-  * NEVER treat a bound as a whole-token figure. A policy that reads \`max_amount = 100\` as
-    "100 XLM" and scales it up authorizes 10,000,000x what the user asked for. Reading it as
-    100 base units when the user meant 100 XLM rejects everything they try. Both have shipped.
-  * Do not assume 7 decimals. The policy never needs the decimal count at all — that is
-    precisely why it must not reason about it.
+- UNITS: every install-param bound is already expressed in the SAME units as the argument it
+  constrains, whatever those units are. Compare them DIRECTLY: \`if amount > max_amount { panic }\`.
+  * NEVER convert, scale, multiply or divide a bound. No 10^decimals, no \`decimals()\` call, no
+    unit inference of any kind. The bound and the argument are the same quantity in the same
+    units; any arithmetic between them and the comparison is wrong.
+  * This holds for EVERY argument type, not just token amounts. A bound on a deadline is in
+    whatever the deadline is measured in; a bound on a price, ratio, id or count is in that
+    argument's own units. You cannot tell an argument's units from its Rust type, and you do
+    not need to — that is exactly why you must not reason about them.
+  * Concretely for SEP-41/SAC tokens: \`transfer(from, to, amount)\` takes an i128 in the
+    token's smallest unit (10_000_000 for 1 XLM at 7 decimals), and \`max_amount\` is already in
+    that same smallest unit. Reading it as a whole-token figure and scaling up authorizes
+    10,000,000x what was asked for; both directions of this error have shipped.
 - CLOCKS: \`valid_after_ledger\` and \`valid_until_ledger\` are LEDGER SEQUENCE NUMBERS. Compare
   them against \`e.ledger().sequence()\` (u32), NEVER \`e.ledger().timestamp()\` (u64 unix
   seconds). These are unrelated scales — a live ledger sequence is ~4_000_000 while a unix

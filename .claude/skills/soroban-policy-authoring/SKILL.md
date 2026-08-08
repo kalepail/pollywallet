@@ -51,16 +51,28 @@ the bound.
 `max_amount = 100` caps at 100 stroops = 0.00001 XLM. Reproduced on a real device: 0.00001 XLM
 passed, 1 XLM failed, same rule, same destination, only the amount differed.
 
-The fix has three parts, and all three are load-bearing:
+**The fix is to state the unit, not to convert it.** Constraint values are base units
+everywhere — schema, install params, generated tests, the field the user types into — because
+that is what the contract compares. The prompt tells Kimi bounds are already in the argument's
+own units, so it compares them directly and never calls `decimals()` or scales inside a policy.
 
-* `ContractPermission.decimals` is **queried** with `requestTokenDecimals()`, never assumed.
-  7 is near-universal but is a property of the asset, not of Stellar. `null` means "not a
-  token", and amounts pass through as base units.
-* The schema stores base units everywhere. The builder's Min/Max inputs are the only place a
-  human number exists; `toBaseUnits`/`toDisplayUnits` convert at that edge, with string math
-  (float arithmetic puts 0.1 XLM at 1000000.0000000001 stroops).
-* The prompt tells Kimi amounts are pre-scaled on both sides, so it must compare them
-  directly and must never call `decimals()` or scale inside the policy.
+The first attempt at this converted instead: the builder took whole tokens and multiplied by
+`10^decimals`. It was reverted, and the reason generalises. Converting requires deciding that
+an argument *is* a token amount, and the heuristic used was "any `i128` on a contract that
+answered `decimals()`". A policy can constrain any argument of any contract, so an `i128`
+deadline, id, price or ratio would have been silently multiplied by ten million — the same
+error the conversion existed to prevent, pointing the other way. **Units are a property of an
+argument's meaning, and a contract spec carries types, not meaning.** Do not infer them.
+
+What remains from that attempt, deliberately:
+
+* `ContractPermission.decimals` is still **queried** with `requestTokenDecimals()` — never
+  assumed, since 7 is a property of the asset, not of Stellar — but it is now display only. It
+  renders `= 100.0000000` beside a typed `1000000000`, which is what makes a mis-scaled bound
+  visible at the moment it is typed. Nothing derived from it is stored.
+* Bounds are validated as whole numbers where they are entered. Left to drift they reach
+  `BigInt()` at deploy and `${value}i128` in generated Rust, failing opaquely and far from the
+  cause.
 
 **Clocks have the same shape of trap.** `valid_after_ledger`/`valid_until_ledger` are ledger
 sequences, compared against `e.ledger().sequence()` (u32) — never `e.ledger().timestamp()`
