@@ -105,9 +105,9 @@ balances directly and need none.
 
 ## Check assumptions against Stellar Raven, not against memory
 
-Every bug in this file began as something that felt obvious. Stroops felt obvious. The clock
-felt obvious. Training data lags the protocol, and a confident wrong answer about a
-denomination is indistinguishable from a correct one until it reaches a device.
+Every bug in this file began as something that felt obvious. Training data lags the protocol, and
+a confident wrong answer about a denomination is indistinguishable from a correct one until it
+reaches a device.
 
 So before writing or changing any rule that encodes a domain fact — a unit, a limit, an error
 code, an ABI shape, a storage durability — spend the one call to confirm it:
@@ -125,12 +125,11 @@ code, an ABI shape, a storage durability — spend the one call to confirm it:
   verifier at signature-check time, not in signer storage — and acting on the first reading
   alone would have broken sign-in.
 
-This costs one tool call and a few seconds. The units bug cost two live policies and a
-device-level debugging session to find.
-
 ## Accepted risks
 
-Recorded so they read as decisions rather than oversights. Re-open them before mainnet.
+Deferred, not settled — re-open every one before mainnet. The unconstrained passkey rule is not
+on this list; it is a settled decision (below), and treating it as a deferred risk is the
+misreading that decision exists to prevent.
 
 * **`streamPolicyCode` is public and unauthenticated.** Any visitor can drive a policy
   generation, which spends Workers AI budget, sandbox container CPU, and — since the Raven
@@ -175,6 +174,28 @@ the strong key's own rule; adding rules beside it only adds alternatives.
 The practical rule when reasoning about a cap: a wallet's spending ceiling is the *maximum* over
 the rules a given signer can satisfy, never the minimum.
 
+## Decision (2026-08-10): rule #0 stays unconstrained, so policies are bounded delegation
+
+The owner decided that context rule #0 — the `Default` rule holding the passkey — will not carry
+a policy. That is settled, not a backlog item, and not an oversight to be discovered again.
+
+Reasoning follows from the section above: the ceiling is the maximum over the rules a signer can
+satisfy, and the passkey, authorizing any context under `Default`, can create further rules. A
+cap on rule #0 therefore binds only until the passkey lifts it — the appearance of a limit, paid
+for with the one signing path that must always work.
+
+**So the feature is bounded delegation.** A policy lets a *weaker* key act within declared
+limits: the ephemeral ed25519 keypair generated at install time (`routes/policies.tsx`, secret in
+`localStorage`, registered as an External signer with an ed25519 verifier —
+`policy-deploy.ts:147-150`), which needs no biometric. Policies are not a spending limit on the
+wallet owner and are not meant to become one.
+
+**Evaluate future work against that.** A proposal is worth *less* if its value assumed policies
+constrain the owner — "cap the wallet", "block the passkey from X", "make rule #0 safe" all
+propose a firewall the standard does not offer, so the work buys nothing it claims. A proposal is
+worth *more* if it strengthens delegation: key lifecycle, revocation, expiry, tighter scoping of
+what a delegated key may do. Ask which of the two a change buys before costing it.
+
 ## The other things that are easy to get wrong
 
 ### 1. There are TWO context shapes, and the `execute()` wrapper is real
@@ -215,8 +236,10 @@ CallContract-scoped by design, so they only ever see Shape A.
 **A generated policy cannot know at compile time which rule it will be attached to, so it must
 handle both and default-reject on both.**
 
-Rule matching keys on `context.contract`, so the shapes are mutually exclusive per rule: a
-`Default` rule (or one scoped to the account's own address) sees Shape B; a
+The shapes are mutually exclusive per rule, because a rule is only accepted for a context whose
+type it covers — `Default` covers everything, `CallContract(X)` only calls to X
+(`storage.rs:289-308`). Nothing matches on `context.contract`; the caller names an id and a type
+mismatch panics. So a `Default` rule (or one scoped to the account's own address) sees Shape B; a
 `CallContract(token)` rule is never selected for an execute-routed call. And under Shape B the
 inner call is a direct contract-to-contract invocation, which Soroban always authorizes — **it
 never appears as a separate authorization context.** A policy receiving an execute context
