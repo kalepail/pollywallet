@@ -33,7 +33,9 @@ nothing stops a future edit from quietly removing it.
 
 Every claim here was verified against the checked-in submodule
 `stellar-contracts/packages/accounts/` and the local clone of `stellar/smart-account-kit`
-on 2026-08-07. Where a claim is measured against the live Workers AI endpoint it says so.
+on 2026-08-07, and re-checked against the current pin (**v0.7.2**) on 2026-08-10 — every
+`storage.rs:` / `mod.rs:` line citation below still points at the code it claims. Where a
+claim is measured against the live Workers AI endpoint it says so.
 
 **Type and ABI parity is now enforced, not remembered.** `oz-parity.test.ts` parses
 `ContextRule`, `Signer` and `ContextRuleType` out of the submodule and compares them

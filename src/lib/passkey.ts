@@ -97,7 +97,12 @@ export async function createPasskey(
       displayName: userName,
     },
     authenticatorSelection: {
-      residentKey: "preferred",
+      // Discoverable, and REQUIRED rather than preferred. signIn() calls startAuthentication
+      // with no allowCredentials, which can only surface discoverable credentials — so a
+      // non-discoverable one works on the device that made it and can never be signed into
+      // anywhere else, its only locator gone. "preferred" lets an authenticator make exactly
+      // that. "required" moves the failure to creation, where it is visible and recoverable.
+      residentKey: "required",
       // Not a preference — the on-chain verifier panics with VerifiedBitNotSet unless the UV
       // flag is set (validate_user_verified_bit_set, accounts/src/verifiers/webauthn.rs).
       // "preferred" lets an authenticator return UV=0, which still registers and still signs

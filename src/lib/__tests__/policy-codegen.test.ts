@@ -426,3 +426,21 @@ describe("prompt facts that must not regress", () => {
     expect(prompt).toMatch(/NEVER \\?`?e\.ledger\(\)\.timestamp\(\)/);
   });
 });
+
+// The account does not search for an applicable rule — the caller names one in
+// AuthPayload.context_rule_ids and get_validated_context_by_id panics UnvalidatedContext
+// unless the named rule's type covers the context (storage.rs:289-308). The old wording
+// ("rule matching keys on context.contract") implied a search. The conclusion it supported
+// was right, which is what makes wrong reasoning in a prompt dangerous: the model generalises
+// from the mechanism, not the conclusion.
+describe("the prompt describes rule selection accurately", () => {
+  const prompt = buildSystemPrompt();
+
+  it("does not claim the account matches rules by contract", () => {
+    expect(prompt).not.toMatch(/rule matching keys on/);
+  });
+
+  it("explains exclusivity by what a rule's type covers", () => {
+    expect(prompt).toMatch(/Default covers everything, CallContract\(X\) covers only calls to X/);
+  });
+});

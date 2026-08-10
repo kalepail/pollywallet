@@ -611,8 +611,8 @@ Keying on the name alone misreads a TARGET contract that happens to expose its o
 decode that call's first three arguments as (target, fn_name, inner_args) and validate
 entirely the wrong values. Both paths must DEFAULT-REJECT.
 
-The two shapes are mutually exclusive per rule, because rule matching keys on
-\`context.contract\`:
+The two shapes are mutually exclusive per rule, because a rule is only accepted for a context
+whose type it covers — Default covers everything, CallContract(X) covers only calls to X:
   - A Default rule (or a CallContract rule scoped to the ACCOUNT's own address) matches the
     execute context and sees Shape B.
   - A CallContract rule scoped to a TOKEN address is never selected for an execute-routed

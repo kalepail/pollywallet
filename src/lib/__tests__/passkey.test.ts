@@ -236,6 +236,21 @@ describe("passkey sign-in", () => {
     expect(optionsJSON.challenge).toEqual(expect.any(String));
   });
 
+  // signIn() offers no allowCredentials, so only a DISCOVERABLE credential can ever be found.
+  // "preferred" permits an authenticator to create a non-discoverable one, producing a wallet
+  // that works on its birth device and is unreachable everywhere else — with no way to detect
+  // it until someone tries to sign in from a second device and the credential simply is not
+  // offered. "required" fails at creation instead, where it can be acted on.
+  it("requires a discoverable credential so the wallet can be signed into elsewhere", async () => {
+    webauthn.register.mockResolvedValue({
+      id: "credential-id",
+      response: { publicKey: base64url(Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)])) },
+    });
+    await createPasskey("Polly", "user");
+    expect(webauthn.register.mock.calls[0][0].optionsJSON.authenticatorSelection)
+      .toMatchObject({ residentKey: "required" });
+  });
+
   // The verifier panics with VerifiedBitNotSet unless the UV flag is set, so anything less
   // than "required" mints wallets that sign in and then fail every transaction on-chain.
   // See validate_user_verified_bit_set in accounts/src/verifiers/webauthn.rs.
