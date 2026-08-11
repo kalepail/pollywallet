@@ -16,6 +16,7 @@ import {
 } from "@/lib/passkey";
 import {
   requestRemoveContextRule,
+  requestRemoveSigner,
   requestRenameContextRule,
   requestUpdateExpiration,
   assertTransactionSuccess,
@@ -33,6 +34,14 @@ export function RulesManager() {
       return loadWallet();
     } catch {
       return null;
+    }
+  });
+  const [ephemeralSecrets] = useState<Record<string, string>>(() => {
+    try {
+      const value = JSON.parse(localStorage.getItem("pollywallet:ephemeral-signers") || "{}");
+      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    } catch {
+      return {};
     }
   });
 
@@ -224,6 +233,24 @@ export function RulesManager() {
     if (ok) await fetchRules(wallet.contractId);
   };
 
+  const handleRevoke = async (ruleId: number, signerId: number) => {
+    if (!wallet) return;
+    const result = await requestRemoveSigner({
+      walletContractId: wallet.contractId,
+      contextRuleId: ruleId,
+      signerId,
+    });
+    if (!result.success || !result.hostFuncXdr) {
+      setError(result.error || "Failed to build revoke transaction");
+      return;
+    }
+    const ok = await executeManagementOp(
+      `revoke-${ruleId}-${signerId}`,
+      result.hostFuncXdr
+    );
+    if (ok) await fetchRules(wallet.contractId);
+  };
+
   const handleUpdateExpiration = async (
     ruleId: number,
     validUntil: number | null
@@ -339,6 +366,8 @@ export function RulesManager() {
               onRename={handleRename}
               onDelete={handleDelete}
               onUpdateExpiration={handleUpdateExpiration}
+              ephemeralSecrets={ephemeralSecrets}
+              onRevoke={handleRevoke}
             />
           ))}
 

@@ -8,6 +8,10 @@ interface RemoveRuleInput {
   contextRuleId: number;
 }
 
+interface RemoveSignerInput extends RemoveRuleInput {
+  signerId: number;
+}
+
 interface RenameRuleInput {
   walletContractId: string;
   contextRuleId: number;
@@ -37,6 +41,19 @@ function validateRemoveInput(data: unknown): RemoveRuleInput {
   if (typeof d.contextRuleId !== "number" || d.contextRuleId < 0)
     throw new Error("contextRuleId must be a non-negative number");
   return { walletContractId: d.walletContractId, contextRuleId: d.contextRuleId };
+}
+
+function validateRemoveSignerInput(data: unknown): RemoveSignerInput {
+  const rule = validateRemoveInput(data);
+  const signerId = (data as Record<string, unknown>).signerId;
+  if (
+    typeof signerId !== "number" ||
+    !Number.isInteger(signerId) ||
+    signerId < 0 ||
+    signerId > MAX_U32
+  )
+    throw new Error(`signerId must be a whole number from 0 to ${MAX_U32}`);
+  return { ...rule, signerId };
 }
 
 function validateRenameInput(data: unknown): RenameRuleInput {
@@ -105,6 +122,30 @@ export const buildRemoveContextRuleTx = createServerFn({ method: "POST" })
     }
   });
 
+/** Build a remove_signer invocation without removing its context rule or policies. */
+export const buildRemoveSignerTx = createServerFn({ method: "POST" })
+  .inputValidator(validateRemoveSignerInput)
+  .handler(async ({ data }): Promise<BuildTxResult> => {
+    try {
+      const { Address, xdr, nativeToScVal } = await import("@stellar/stellar-sdk");
+
+      const hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
+        new xdr.InvokeContractArgs({
+          contractAddress: Address.fromString(data.walletContractId).toScAddress(),
+          functionName: "remove_signer",
+          args: [
+            nativeToScVal(data.contextRuleId, { type: "u32" }),
+            nativeToScVal(data.signerId, { type: "u32" }),
+          ],
+        })
+      );
+
+      return { success: true, error: null, hostFuncXdr: hostFunc.toXDR("base64") };
+    } catch (err: any) {
+      return { success: false, error: err.message || "Failed to build remove signer tx", hostFuncXdr: null };
+    }
+  });
+
 /**
  * Build an update_context_rule_name invocation on the smart wallet.
  */
@@ -170,6 +211,14 @@ export async function requestRemoveContextRule(params: {
   contextRuleId: number;
 }): Promise<BuildTxResult> {
   return buildRemoveContextRuleTx({ data: params });
+}
+
+export async function requestRemoveSigner(params: {
+  walletContractId: string;
+  contextRuleId: number;
+  signerId: number;
+}): Promise<BuildTxResult> {
+  return buildRemoveSignerTx({ data: params });
 }
 
 export async function requestRenameContextRule(params: {

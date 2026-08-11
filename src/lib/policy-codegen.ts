@@ -653,9 +653,9 @@ CONSTRAINT KINDS:
 - "range" { min?, max? }: The numeric argument must be within [min, max]. Panic if outside. Store limits via install_params so they can be reconfigured.
 - "allowlist" { values[] }: The argument must be one of the listed values. Panic otherwise.
 - "blocklist" { values[] }: The argument must NOT be one of the listed values. Panic if it matches.
-- "unconstrained" (or absent): No constraint — the argument may be ANY valid value. Do NOT restrict it. Do NOT hardcode any value for it. Do NOT infer restrictions from the schema JSON. If a constraint is not explicitly set, the argument is unrestricted.
+- "unconstrained" (or absent): No constraint — the argument may be ANY valid value. Do NOT restrict it, do NOT hardcode a value for it, and do NOT infer restrictions from its name, its type, or anything else in the schema JSON. If it also carries no note, ignore it COMPLETELY: do not decode it at all. Calling try_from_val on an argument you have no rule for buys nothing, and a failed decode panics — which aborts the whole transaction and fails the positive control every rejection test is built on, so the suite stops testing anything.
 
-CRITICAL: Only enforce constraints that are EXPLICITLY declared in the schema. Arguments without a constraint (or with kind "unconstrained") MUST allow any value. Never infer or assume constraints from argument names, types, or any other schema metadata.
+CRITICAL: Only enforce constraints that are EXPLICITLY declared in the schema.
 
 NOTES:
 Each function and each argument can have a "note" field containing natural language guidance. Use these notes to implement complex enforcement behaviors that constraints alone cannot express. Examples:
@@ -718,7 +718,7 @@ IMPORTANT: Your enforce() function MUST:
   execute(target, fn, args) wrapper (Shape B, Default rules). Dispatch on fn_name.
 - DEFAULT-REJECT any unrecognized contract address or function name, on both shapes
 - Apply argument rules using positional indices matching the schema's arg order (0, 1, 2, ...)
-- ONLY enforce constraints that are explicitly declared in the schema — unconstrained arguments must pass through without any checks
+- ONLY enforce constraints that are explicitly declared in the schema — an unconstrained, note-free argument must be left undecoded and unchecked
 - Be safe when called multiple times per transaction (once per auth context per policy)`;
 }
 

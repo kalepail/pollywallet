@@ -425,6 +425,21 @@ describe("prompt facts that must not regress", () => {
     expect(prompt).toMatch(/e\.ledger\(\)\.sequence\(\)/);
     expect(prompt).toMatch(/NEVER \\?`?e\.ledger\(\)\.timestamp\(\)/);
   });
+
+  // Every rejection test opens with a positive control built from build_args_cX_fY, which
+  // pushes a value for EVERY arg — including ones the schema says to ignore
+  // (policy-sandbox.ts, generateArgBuilderLines). A policy that decodes a note-free
+  // unconstrained arg and panics on the decode kills that control, so every negative test
+  // then "passes" on a panic raised before enforcement was ever reached. The suite goes red
+  // for the wrong reason and stops discriminating. "Allow any value" is not enough: it still
+  // permits decode-then-don't-check.
+  it("tells the model not to decode note-free unconstrained arguments at all", () => {
+    expect(prompt).toMatch(/carries no note, ignore it COMPLETELY: do not decode it at all/);
+    expect(prompt).toMatch(/try_from_val on an argument you have no rule for/);
+    expect(prompt).toMatch(/note-free argument must be left undecoded and unchecked/);
+    // The wording that licensed decoding must not come back.
+    expect(prompt).not.toMatch(/unconstrained arguments must pass through without any checks/);
+  });
 });
 
 // The account does not search for an applicable rule — the caller names one in

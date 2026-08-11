@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import { Buffer } from "buffer";
+import { StrKey } from "@stellar/stellar-sdk";
 import { highlightRust } from "@/lib/highlight";
 import {
   Trash,
@@ -27,6 +29,24 @@ interface RuleCardProps {
   onRename: (ruleId: number, newName: string) => void;
   onDelete: (ruleId: number) => void;
   onUpdateExpiration: (ruleId: number, validUntil: number | null) => void;
+  ephemeralSecrets?: Readonly<Record<string, string>>;
+  onRevoke?: (ruleId: number, signerId: number) => void;
+}
+
+export function delegatedKeysForRule(
+  rule: ContextRuleInfo,
+  ephemeralSecrets: Readonly<Record<string, string>>,
+) {
+  if (rule.policies.length === 0) return [];
+
+  return rule.signers.flatMap((signer, index) => {
+    const signerId = rule.signerIds[index];
+    if (signerId == null) return [];
+    const address = signer.type === "External" && signer.keyData?.length === 32
+      ? StrKey.encodeEd25519PublicKey(Buffer.from(signer.keyData))
+      : signer.address;
+    return [{ signerId, address, hasSecret: Boolean(ephemeralSecrets[address]) }];
+  });
 }
 
 function truncateAddress(addr: string, chars = 8): string {
@@ -102,12 +122,15 @@ export default function RuleCard({
   onRename,
   onDelete,
   onUpdateExpiration,
+  ephemeralSecrets = {},
+  onRevoke = () => {},
 }: RuleCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [newName, setNewName] = useState(rule.name);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState<number | null>(null);
   const [editingExpiration, setEditingExpiration] = useState(false);
   const [expirationInput, setExpirationInput] = useState(
     rule.validUntil?.toString() ?? ""
@@ -120,6 +143,7 @@ export default function RuleCard({
   const isDefault = rule.contextType === "Default" && rule.policies.length === 0;
   const isProcessing = actionInProgress !== null;
   const target = rule.targetContract ?? rule.wasmHash;
+  const delegatedKeys = delegatedKeysForRule(rule, ephemeralSecrets);
 
   const handleRenameSubmit = () => {
     const trimmed = nameInputRef.current?.value.trim() ?? newName.trim();
@@ -255,7 +279,7 @@ export default function RuleCard({
           )}
 
           {/* Signers */}
-          {rule.signers.length > 0 && (
+          {rule.policies.length === 0 && rule.signers.length > 0 && (
             <div>
               <p className="text-xs text-gray-400 mb-2 font-medium flex items-center gap-1">
                 <Key size={12} /> Signers ({rule.signers.length})
@@ -279,6 +303,80 @@ export default function RuleCard({
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Policy rules use weaker local keys whose IDs can be revoked independently. */}
+          {rule.policies.length > 0 && (
+            <div>
+              <p className="text-xs text-gray-400 mb-2 font-medium flex items-center gap-1">
+                <Key size={12} /> Delegated keys ({delegatedKeys.length})
+              </p>
+              {delegatedKeys.length === 0 ? (
+                <p className="text-xs text-gray-500">No delegated keys</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {delegatedKeys.map(({ signerId, address, hasSecret }) => (
+                    <div
+                      key={signerId}
+                      className="bg-slate-900/40 rounded-lg px-3 py-2"
+                    >
+                      <div className="flex items-center gap-2">
+                        <code className="text-xs text-gray-400 font-mono truncate flex-1">
+                          {truncateAddress(address, 10)}
+                        </code>
+                        <CopyButton text={address} />
+                        <Badge variant={hasSecret ? "teal" : "neutral"}>
+                          {hasSecret ? "Secret on this device" : "Secret missing"}
+                        </Badge>
+                        <span className="text-xs text-gray-600">id:{signerId}</span>
+                      </div>
+                      <div className="flex justify-end mt-2">
+                        {confirmRevoke === signerId ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-red-400">Revoke this key?</span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRevoke(rule.id, signerId);
+                                setConfirmRevoke(null);
+                              }}
+                              disabled={isProcessing}
+                              className="px-2 py-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs rounded transition-colors"
+                            >
+                              {isProcessing && actionInProgress === `revoke-${rule.id}-${signerId}` ? (
+                                <Loader size="sm" />
+                              ) : (
+                                "Confirm"
+                              )}
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmRevoke(null);
+                              }}
+                              className="px-2 py-1 text-gray-400 hover:text-white text-xs transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmRevoke(signerId);
+                            }}
+                            disabled={isProcessing}
+                            className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-red-400 hover:bg-red-950/30 rounded transition-colors disabled:opacity-50"
+                          >
+                            <Trash size={12} /> Revoke key
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
