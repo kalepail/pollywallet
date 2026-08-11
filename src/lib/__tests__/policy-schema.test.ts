@@ -7,6 +7,7 @@ import {
   schemaFromJSON,
   emptySchema,
   constraintKindsForType,
+  isIntegerArgType,
   toDisplayUnits,
   SCHEMA_VERSION,
   type PolicySchema,
@@ -223,6 +224,50 @@ describe("validateSchema", () => {
     });
   });
 
+  // A schema the pipeline cannot honour must fail here, not install "successfully" with the
+  // unhonoured part silently inert. Both of these were found by an adversarial review that
+  // built passing mutants against them.
+  describe("schemas the deployment path cannot express", () => {
+    it("rejects weighted_threshold outright", () => {
+      const result = validateSchema(
+        validSchema({
+          globalRules: [{
+            type: "weighted_threshold",
+            params: {
+              threshold: 3,
+              weights: [
+                { signer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", weight: 1 },
+                { signer: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBP2X", weight: 2 },
+              ],
+            },
+          }],
+        })
+      );
+      expect(result.valid).toBe(false);
+      // Well-formed weights must not buy their way past: it is the feature that is unsupported,
+      // not this particular set of numbers.
+      expect(result.errors.join(" ")).toMatch(/weighted_threshold is not supported/);
+    });
+
+    it("rejects a schema listing more than one contract", () => {
+      const base = validSchema();
+      const result = validateSchema(
+        validSchema({
+          contracts: [
+            base.contracts[0],
+            { ...base.contracts[0], address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC" },
+          ],
+        })
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toMatch(/Only one contract per policy/);
+    });
+
+    it("still accepts exactly one contract", () => {
+      expect(validateSchema(validSchema()).valid).toBe(true);
+    });
+  });
+
   describe("time_lock rule (global)", () => {
     it("should accept validAfterLedger only", () => {
       const result = validateSchema(
@@ -247,6 +292,28 @@ describe("validateSchema", () => {
       expect(result.valid).toBe(false);
     });
   });
+});
+
+// The constraint editor labels a value "(base units)" and warns it must be a whole number.
+// `exact` is valid on address, bool, symbol and string too, where both are false — this is the
+// predicate that decides which input the editor renders.
+describe("isIntegerArgType", () => {
+  it.each(["i128", "u128", "i64", "u64", "i32", "u32", "I128", "U32"])(
+    "%s carries base units",
+    (t) => expect(isIntegerArgType(t)).toBe(true)
+  );
+
+  it.each(["address", "bool", "symbol", "string", "bytes", "Vec<address>"])(
+    "%s does not",
+    (t) => expect(isIntegerArgType(t)).toBe(false)
+  );
+
+  // These accept only `unconstrained` today, so no editor reaches them — but if that changes,
+  // they still are not base-unit quantities and must not inherit the label by default.
+  it.each(["u256", "i256", "timepoint", "duration"])(
+    "%s is not treated as a base-unit type",
+    (t) => expect(isIntegerArgType(t)).toBe(false)
+  );
 });
 
 // --- constraintKindsForType ---

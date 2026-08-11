@@ -144,6 +144,32 @@ misreading that decision exists to prevent.
   self-hosted and free to the owner. `RAVEN_REQUEST_TIMEOUT_MS` bounds the failure mode that
   actually mattered, which was a stalled request hanging a generation.
 
+## Refused schema features (2026-08-10)
+
+`validateSchema()` rejects these outright rather than accepting them and quietly not honouring
+them. Both were found by an adversarial review that wrote passing mutants against them, and
+both are the same defect: the schema could express something the deployment path could not.
+
+* **`weighted_threshold`.** Deployment attaches exactly one External signer — the ephemeral
+  key — so the addresses named in `weights` are not signers on the rule. Install params carry
+  neither the weights nor the threshold, and the generated suite emits only a positive test for
+  this rule and cannot build a negative one, because it fabricates arbitrary signers rather
+  than the named ones. A policy ignoring the rule entirely passed all 11 generated tests.
+  Accepting the schema tells a user they configured M-of-N when they deployed 1-of-1. The rule
+  type, its label and its editor are still in the code so an older stored schema renders; it is
+  gone from the picker and refused by validation. Re-enable only when install params carry the
+  weights AND the harness proves an unknown, zero-weight, and below-threshold signer set are
+  each rejected.
+
+* **More than one contract per schema.** `buildInstallPolicyTx` creates a single
+  `ContextRuleType::CallContract` from `contracts[0]`. The account rejects calls to every other
+  listed contract before the policy is consulted, so permissions 2..N are inert while the UI
+  reports a successful install. Split them into separate policies.
+
+The general rule: if the harness cannot write a test that fails against a policy ignoring the
+feature, the feature does not ship. A decorative constraint is worse than a missing one,
+because the user believes it.
+
 ## A policy rule is an authorization alternative, not a wallet firewall
 
 Installing a policy does not restrict what the wallet can do. It adds one more way to authorize
@@ -419,6 +445,9 @@ Rules for anything you add:
   test nominally about contract #2 actually sent contract #1's context.
 - Generate both sides of every boundary. An allowlist that only tests the allowed value is
   passed by a policy that allows everything.
+- Generate one test per value in a list, not one per list. A blocklist that only exercised
+  `values[0]` was passed by a mutant rejecting the first address and accepting the second —
+  which is the shape a model most often writes when handed a list.
 - Scope test names with the `c{i}_f{j}` index — two functions sharing an argument name
   otherwise emit duplicate Rust fns and the crate fails to compile.
 - A run that parsed **zero** tests is a failure, not a pass (`[].every()` is `true`).

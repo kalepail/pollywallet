@@ -11,7 +11,7 @@ import type {
   GlobalRuleType,
 } from "@/lib/policy-schema";
 import {
-  constraintKindsForType, toDisplayUnits,
+  constraintKindsForType, isIntegerArgType, toDisplayUnits,
 } from "@/lib/policy-schema";
 
 // --- Constraint kind labels ---
@@ -38,9 +38,13 @@ const GLOBAL_RULE_DESCRIPTIONS: Record<GlobalRuleType, string> = {
   time_lock: "Restrict to a ledger number window",
 };
 
+// weighted_threshold is deliberately absent: validateSchema refuses it (a deployed policy
+// carries one delegated key, install params never receive the weights, and the generated suite
+// cannot prove a below-threshold set is rejected). Offering it here would let a user assemble a
+// rule that only fails at validation. The label and editor stay so an older stored schema still
+// renders instead of blanking out.
 const GLOBAL_RULE_TYPES: GlobalRuleType[] = [
   "threshold",
-  "weighted_threshold",
   "time_lock",
 ];
 
@@ -349,6 +353,7 @@ function ArgRow({
       {/* Constraint value editor */}
       <ConstraintEditor
         constraint={arg.constraint}
+        argType={arg.type}
         onChange={(c) => onChange({ ...arg, constraint: c })}
         decimals={decimals}
       />
@@ -423,10 +428,12 @@ function NumericInput({
 
 function ConstraintEditor({
   constraint,
+  argType,
   onChange,
   decimals,
 }: {
   constraint?: ArgConstraint;
+  argType: string;
   onChange: (c: ArgConstraint) => void;
   /** decimals() for this contract, if it answered. Display hint only — never a conversion. */
   decimals?: number;
@@ -434,17 +441,27 @@ function ConstraintEditor({
   if (!constraint || constraint.kind === "unconstrained") return null;
 
   // Numeric bounds are compared against the raw argument, so they are always base units.
-  const unit = " (base units)";
+  // `exact` is the one kind that also applies to address/bool/symbol/string, where a base-unit
+  // label and a whole-number warning would both be wrong.
+  const numeric = isIntegerArgType(argType);
+  const unit = numeric ? " (base units)" : "";
 
   switch (constraint.kind) {
     case "exact":
-      return (
+      return numeric ? (
         <NumericInput
           label={`Value${unit}`}
           placeholder="Exact value to match"
           value={constraint.value}
           decimals={decimals}
           onChange={(v) => onChange({ kind: "exact", value: v ?? "" })}
+        />
+      ) : (
+        <ParamInput
+          label="Value"
+          placeholder={`Exact ${argType} to match`}
+          value={constraint.value ?? ""}
+          onChange={(v) => onChange({ kind: "exact", value: v })}
         />
       );
     case "range": {

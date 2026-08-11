@@ -502,6 +502,34 @@ describe("rejection counterexamples stay inside the type", () => {
   });
 });
 
+// Testing only values[0] is how a policy that checks `x == blocked[0]` — the shape a model most
+// often produces from a list — ships green with every later entry still spendable. An adversarial
+// review built exactly that mutant against a two-address blocklist and it passed all 11 tests.
+describe("every blocklisted value gets its own rejection test", () => {
+  const BLOCKED = [
+    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBP2X",
+    "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCLZR",
+  ];
+  const rust = generateTestCases({
+    $schema: SCHEMA_VERSION, name: "blocklist", description: "blocklist fixture", globalRules: [],
+    contracts: [{ address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "transfer", args: [
+        { name: "to", type: "address", constraint: { kind: "blocklist", values: BLOCKED } },
+      ] }] }],
+  } as PolicySchema);
+
+  it("emits one test per blocked value, not just the first", () => {
+    const names = [...rust.matchAll(/fn (test_enforce_\w*_to_blocked_\d+)\(/g)].map((m) => m[1]);
+    expect(names).toHaveLength(BLOCKED.length);
+    expect(new Set(names).size).toBe(BLOCKED.length);
+  });
+
+  it("puts each blocked value into the generated Rust", () => {
+    for (const value of BLOCKED) expect(rust).toContain(value);
+  });
+});
+
 describe("argument type honesty", () => {
   const withArgs = (args: any[]): PolicySchema => ({
     $schema: SCHEMA_VERSION,

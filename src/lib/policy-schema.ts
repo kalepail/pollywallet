@@ -144,6 +144,16 @@ export interface TxPattern {
 // --- Constraint-Type Compatibility ---
 
 /** Returns the valid constraint kinds for a given argument type. */
+/**
+ * Whether a bound or exact value for this type is a raw integer quantity.
+ *
+ * Only these carry base units. `exact` is also valid on address, bool, symbol and string, and
+ * labelling one of those "(base units)" tells the user their memo is a number.
+ */
+export function isIntegerArgType(argType: string): boolean {
+  return ["i128", "u128", "i64", "u64", "i32", "u32"].includes(argType.toLowerCase());
+}
+
 export function constraintKindsForType(argType: string): ArgConstraintKind[] {
   const t = argType.toLowerCase();
 
@@ -221,6 +231,16 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
   // Contracts validation
   if (!Array.isArray(schema.contracts) || schema.contracts.length === 0) {
     errors.push("At least one contract is required");
+  } else if (schema.contracts.length > 1) {
+    // Deployment builds ONE ContextRuleType::CallContract from contracts[0] (policy-deploy.ts).
+    // The account rejects calls to every other contract before the policy is ever consulted, so
+    // a multi-contract schema installs "successfully" with all but the first permission dead.
+    // Fail here rather than report a false success.
+    errors.push(
+      `Only one contract per policy is supported — this schema lists ${schema.contracts.length}. ` +
+      `Deployment attaches the policy to a single contract, so the others would silently never apply. ` +
+      `Split them into separate policies.`
+    );
   } else {
     for (let ci = 0; ci < schema.contracts.length; ci++) {
       const c = schema.contracts[ci];
@@ -450,24 +470,22 @@ function validateGlobalRule(rule: GlobalRule, prefix: string): string[] {
       break;
     }
     case "weighted_threshold": {
-      if (typeof rule.params.threshold !== "number" || rule.params.threshold < 1) {
-        errors.push(`${prefix}: threshold must be a positive number`);
-      }
-      if (!Array.isArray(rule.params.weights) || rule.params.weights.length === 0) {
-        errors.push(`${prefix}: weights must be a non-empty array`);
-      } else {
-        let totalWeight = 0;
-        for (const w of rule.params.weights) {
-          if (typeof w.weight !== "number" || w.weight < 1) {
-            errors.push(`${prefix}: each weight must be a positive number`);
-          } else {
-            totalWeight += w.weight;
-          }
-        }
-        if (totalWeight < rule.params.threshold) {
-          errors.push(`${prefix}: total weights (${totalWeight}) must be >= threshold (${rule.params.threshold})`);
-        }
-      }
+      // Refused, not validated. Three things have to be true for a weighted threshold to mean
+      // anything, and none of them are:
+      //   1. Deployment attaches exactly ONE External signer, the ephemeral key
+      //      (policy-deploy.ts). The addresses named in `weights` are not signers on the rule.
+      //   2. Install params carry no weights and no threshold, so the deployed policy has
+      //      nothing to enforce against.
+      //   3. The generated suite has only a positive test for this rule and no rejection test,
+      //      and cannot build one: it fabricates arbitrary signers rather than the named ones.
+      // A policy ignoring the rule entirely passes every generated test. Accepting the schema
+      // would tell a user they configured M-of-N when they deployed 1-of-1.
+      errors.push(
+        `${prefix}: weighted_threshold is not supported. A deployed policy carries a single ` +
+        `delegated key, weights are never written to install params, and the generated test ` +
+        `suite cannot prove a below-threshold signer set is rejected — so the rule would be ` +
+        `decorative. Use a "threshold" rule, or express the requirement in an argument note.`
+      );
       break;
     }
     case "time_lock": {

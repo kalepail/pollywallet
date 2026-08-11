@@ -470,13 +470,17 @@ fn test_double_install_is_rejected() {
             break;
 
           case "blocklist":
-            if (arg.constraint.values.length > 0) {
-              const blockedValue = arg.constraint.values[0];
+            // One test per blocked value, not just values[0]. A policy that checks only the
+            // first entry — the shape a model most often produces from a list — passes a
+            // single-value suite while every later entry stays spendable.
+            // Suffixed by index, not by the value: ident() maps "a-b" and "a_b" to the same
+            // token, and two Rust fns with one name is a compile error deep in the sandbox.
+            for (const [bi, blockedValue] of arg.constraint.values.entries()) {
               tests.push(rejectionTest({
-                name: `test_enforce_${suffix}_${ident(arg.name)}_blocked`,
+                name: `test_enforce_${suffix}_${ident(arg.name)}_blocked_${bi}`,
                 argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, blockedValue) }, useConstraintValues: true }),
                 ctxFn, argsFn,
-                why: `enforce() accepted ${arg.name} with a blocklisted value`,
+                why: `enforce() accepted ${arg.name} with the blocklisted value ${blockedValue}`,
               }));
             }
             break;

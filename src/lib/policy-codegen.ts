@@ -666,9 +666,11 @@ Each function and each argument can have a "note" field containing natural langu
 When notes describe rolling sums, rate limits, or stateful behavior, use the spending_limit reference below as an implementation pattern.
 
 CRITICAL RULES FOR ENFORCE:
-1. Match on fn_name FIRST. "execute" means Shape B — unwrap args[0..2], then validate the
-   inner target and function. Any other name is Shape A — validate the contract address, then
-   the function name, then the arguments.
+1. Decide the shape from context.contract, NOT from fn_name. context.contract == smart_account
+   AND fn_name == "execute" means Shape B — unwrap args[0..2], then validate the inner target
+   and function. Anything else is Shape A — validate the contract address, then the function
+   name, then the arguments. A permitted contract that happens to expose its own execute()
+   (OZ ships governors that do) is a Shape A call and must be validated as one.
 2. DEFAULT-REJECT on BOTH shapes: any contract or fn_name not explicitly permitted MUST panic,
    whether it arrived directly or inside an execute wrapper. Never allow an unknown call to
    pass silently. End every match on fn_name with a catch-all arm that panics.
