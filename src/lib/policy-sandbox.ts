@@ -206,6 +206,7 @@ fn create_test_params(env: &soroban_sdk::Env) -> soroban_sdk::Val {
     ${generateInstallParamsHelper(schema)}
 }
 
+${generateIncompleteParamsHelper(schema)}
 fn create_test_signers(env: &soroban_sdk::Env, count: u32) -> soroban_sdk::Vec<Signer> {
     let mut signers = soroban_sdk::Vec::new(env);
     for _ in 0..count {
@@ -235,6 +236,24 @@ fn create_unknown_contract_context(env: &soroban_sdk::Env, args: soroban_sdk::Ve
         contract: <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(env),
         fn_name: ${fnNameExpr},
         args,
+    })
+}
+
+/// An execute() wrapper context (Shape B) carrying an inner call to a contract and function the
+/// schema does not permit. Whichever way the policy handles the wrapper — unwrapping and
+/// validating the inner call, or refusing execute contexts outright — this must be rejected.
+fn create_unknown_inner_execute_context(env: &soroban_sdk::Env, smart_account: &Address) -> Context {
+    let mut inner_args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(env);
+    inner_args.push_back((<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(env)).into_val(env));
+    let mut outer: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(env);
+    // args[0] target, args[1] inner fn, args[2] inner args — none of them in the schema.
+    outer.push_back((<soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(env)).into_val(env));
+    outer.push_back(${symbolExpr(unknownFn, "env")}.into_val(env));
+    outer.push_back(inner_args.into_val(env));
+    Context::Contract(ContractContext {
+        contract: smart_account.clone(),
+        fn_name: soroban_sdk::symbol_short!("execute"),
+        args: outer,
     })
 }
 
@@ -348,6 +367,41 @@ fn test_enforce_rejects_unknown_contract() {
     );
 }`);
 
+  // --- SHAPE B (execute wrapper) ---
+  // Every other context here is a direct call (Shape A). The prompt requires the policy to
+  // handle the execute(target, fn, args) wrapper too and to default-reject inside it, and a
+  // mutant that validated Shape A correctly while accepting ANY outer execute — never unwrapping
+  // the inner call — passed the whole suite. This app only deploys CallContract rules, so the
+  // account selects Shape A today and the mutant is not reachable in the product; it becomes
+  // live the moment a generated policy is attached to a Default rule, which the prompt says it
+  // supports.
+  //
+  // Deliberately negative-only. A policy that refuses execute contexts outright is also correct
+  // and fails closed, so asserting a Shape B call is ACCEPTED would fail a sound policy. Both
+  // readings agree that an unlisted inner target and function must be rejected.
+  tests.push(`
+#[test]
+fn test_enforce_rejects_unknown_inner_call_in_execute_wrapper() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    let context = create_unknown_inner_execute_context(&env, &smart_account);
+    assert!(
+        client.try_enforce(&context, &fixture_signers(&env), &context_rule, &smart_account).is_err(),
+        "enforce() accepted an execute() wrapper whose inner call names a contract and function \\
+         the schema does not permit — under the wrapper the inner call is invoker-authorized and \\
+         never arrives as a second context, so anything not rejected here is authorized"
+    );
+}`);
+
   // --- AUTHORIZATION ---
   // Every other test runs under mock_all_auths(), which masks a missing require_auth().
   // set_auths(&[]) removes all authorizations so the call must fail.
@@ -371,6 +425,95 @@ fn test_enforce_requires_smart_account_auth() {
         client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
         "enforce() succeeded without the smart account's authorization — it must call \\
          smart_account.require_auth()"
+    );
+}`);
+
+  // --- LIFECYCLE AUTHORIZATION ---
+  // The trait requires smart_account.require_auth() in install and uninstall too, not only in
+  // enforce, and only enforce was ever tested. Without these, a policy can be pre-installed
+  // against a predictable (account, rule id) before the real owner gets there, or have its
+  // configuration deleted by anyone — denial of service against a rule that is holding funds.
+  tests.push(`
+#[test]
+fn test_install_requires_smart_account_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    // Withdraw all authorization. smart_account.require_auth() must now fail.
+    env.set_auths(&[]);
+    assert!(
+        client.try_install(&create_test_params(&env), &context_rule, &smart_account).is_err(),
+        "install() succeeded without the smart account's authorization — anyone could install \\
+         configuration against another account's rule id"
+    );
+}`);
+
+  // --- FAIL-CLOSED INSTALL ---
+  // "Installs but authorizes everything" is the failure mode permissive defaults produce, and
+  // every other test in the suite installs a complete, well-formed map, so none of them can see
+  // it. Only emitted when the schema actually declares configuration — with none, Val::VOID is
+  // the correct install and there is nothing to omit.
+  const installSpec = installParamsSpec(schema);
+  if (installSpec.length > 0) {
+    tests.push(`
+#[test]
+fn test_install_rejects_void_params() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    assert!(
+        client.try_install(&soroban_sdk::Val::VOID.to_val(), &context_rule, &smart_account).is_err(),
+        "install() accepted void install_params for a policy that declares ${installSpec.length} \\
+         required key(s) — a policy configured with nothing must fail closed, not fall back to \\
+         permissive defaults"
+    );
+}`);
+
+    if (installSpec.some(p => p.type !== "bool")) {
+      tests.push(`
+#[test]
+fn test_install_rejects_missing_required_param() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    assert!(
+        client.try_install(&create_incomplete_params(&env), &context_rule, &smart_account).is_err(),
+        "install() accepted a params map with a required bound missing — the policy substituted \\
+         a default for configuration it was told is required, so its limit can be removed by \\
+         omitting one map entry"
+    );
+}`);
+    }
+  }
+
+  tests.push(`
+#[test]
+fn test_uninstall_requires_smart_account_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    env.set_auths(&[]);
+    assert!(
+        client.try_uninstall(&context_rule, &smart_account).is_err(),
+        "uninstall() succeeded without the smart account's authorization — anyone could delete \\
+         the configuration a live rule depends on"
     );
 }`);
 
@@ -494,6 +637,21 @@ fn test_double_install_is_rejected() {
       const argsFn = `build_args_c${contractIdx}_f${funcIdx}`;
       const suffix = `c${contractIdx}_f${funcIdx}`;
 
+      // ident() maps "a-b" and "a_b" to one token, so two constrained args whose names collapse
+      // together emitted two Rust fns with the same name and the crate failed to compile — fail
+      // closed, but reported as an opaque build error naming nothing in the schema. Disambiguate
+      // only the collisions, so the common case keeps its readable name.
+      const tokenCounts = new Map<string, number>();
+      for (const a of func.args) {
+        if (!a.constraint || a.constraint.kind === "unconstrained") continue;
+        const token = ident(a.name);
+        tokenCounts.set(token, (tokenCounts.get(token) ?? 0) + 1);
+      }
+      const argToken = (a: ArgPermission) =>
+        (tokenCounts.get(ident(a.name)) ?? 0) > 1
+          ? `a${func.args.indexOf(a)}_${ident(a.name)}`
+          : ident(a.name);
+
       for (const arg of func.args) {
         if (!arg.constraint || arg.constraint.kind === "unconstrained") continue;
 
@@ -504,7 +662,7 @@ fn test_double_install_is_rejected() {
             const wrongValue = generateWrongValueForType(arg.type, arg.constraint.value);
             if (wrongValue) {
               tests.push(rejectionTest({
-                name: `test_enforce_${suffix}_${ident(arg.name)}_wrong_value`,
+                name: `test_enforce_${suffix}_${argToken(arg)}_wrong_value`,
                 argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: wrongValue }, useConstraintValues: true }),
                 ctxFn, argsFn,
                 why: `enforce() accepted ${arg.name} with a value other than the required exact value`,
@@ -518,7 +676,7 @@ fn test_double_install_is_rejected() {
             const belowExact = outsideBound(arg.constraint.value, "below", arg.type);
             if (belowExact && belowExact !== wrongValue) {
               tests.push(rejectionTest({
-                name: `test_enforce_${suffix}_${ident(arg.name)}_below_exact_value`,
+                name: `test_enforce_${suffix}_${argToken(arg)}_below_exact_value`,
                 argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: belowExact }, useConstraintValues: true }),
                 ctxFn, argsFn,
                 why: `enforce() accepted ${arg.name} below the required exact value of ${arg.constraint.value} — an exact constraint is equality, not an upper bound`,
@@ -536,7 +694,7 @@ fn test_double_install_is_rejected() {
               ? outsideBound(arg.constraint.max, "above", arg.type) : null;
             if (above) {
               tests.push(rejectionTest({
-                name: `test_enforce_${suffix}_${ident(arg.name)}_exceeds_max`,
+                name: `test_enforce_${suffix}_${argToken(arg)}_exceeds_max`,
                 argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: above }, useConstraintValues: true }),
                 ctxFn, argsFn,
                 why: `enforce() accepted ${arg.name} above its declared maximum of ${arg.constraint.max}`,
@@ -547,7 +705,7 @@ fn test_double_install_is_rejected() {
               ? outsideBound(arg.constraint.min, "below", arg.type) : null;
             if (below) {
               tests.push(rejectionTest({
-                name: `test_enforce_${suffix}_${ident(arg.name)}_below_min`,
+                name: `test_enforce_${suffix}_${argToken(arg)}_below_min`,
                 argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: below }, useConstraintValues: true }),
                 ctxFn, argsFn,
                 why: `enforce() accepted ${arg.name} below its declared minimum of ${arg.constraint.min}`,
@@ -568,7 +726,7 @@ fn test_double_install_is_rejected() {
               // "a-b" and "a_b" to one token and two Rust fns with one name is a compile error.
               for (const [vi, listedValue] of arg.constraint.values.entries()) {
                 tests.push(acceptanceTest({
-                  name: `test_enforce_${suffix}_${ident(arg.name)}_allowed_${vi}`,
+                  name: `test_enforce_${suffix}_${argToken(arg)}_allowed_${vi}`,
                   argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, listedValue) }, useConstraintValues: true }),
                   ctxFn, argsFn,
                 }));
@@ -582,7 +740,7 @@ fn test_double_install_is_rejected() {
               );
               if (notAllowed) {
                 tests.push(rejectionTest({
-                  name: `test_enforce_${suffix}_${ident(arg.name)}_not_allowlisted`,
+                  name: `test_enforce_${suffix}_${argToken(arg)}_not_allowlisted`,
                   argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: notAllowed }, useConstraintValues: true }),
                   ctxFn, argsFn,
                   why: `enforce() accepted ${arg.name} with a value that is not on its allowlist`,
@@ -599,7 +757,7 @@ fn test_double_install_is_rejected() {
             // token, and two Rust fns with one name is a compile error deep in the sandbox.
             for (const [bi, blockedValue] of arg.constraint.values.entries()) {
               tests.push(rejectionTest({
-                name: `test_enforce_${suffix}_${ident(arg.name)}_blocked_${bi}`,
+                name: `test_enforce_${suffix}_${argToken(arg)}_blocked_${bi}`,
                 argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, blockedValue) }, useConstraintValues: true }),
                 ctxFn, argsFn,
                 why: `enforce() accepted ${arg.name} with the blocklisted value ${blockedValue}`,
@@ -1074,6 +1232,42 @@ function numericSuffix(argType: string): string {
   if (t === "u32") return "u32";
   if (t === "i32") return "i32";
   return "i128"; // default to i128 for unknown numeric types
+}
+
+/**
+ * The same map with ONE required key removed, for the fail-closed install test.
+ *
+ * The key dropped is always a value-carrying one (i128/u32), never a bool flag. A policy that
+ * ignores a flag it has no use for is merely untidy; a policy that cannot find `max_amount` and
+ * carries on has substituted a default for the bound it exists to enforce, and
+ * `unwrap_or(i128::MAX)` authorizes everything. That is the one install bug the rest of the
+ * suite cannot see, because every other test installs a complete map.
+ *
+ * Returns "" when the schema declares no value-carrying param, in which case the caller emits
+ * no test rather than a vacuous one.
+ */
+function generateIncompleteParamsHelper(schema: PolicySchema): string {
+  const spec = installParamsSpec(schema);
+  const dropped = spec.find(p => p.type !== "bool");
+  if (!dropped) return "";
+
+  const parts = spec.filter(p => p.key !== dropped.key).map(p => {
+    const val = p.type === "i128" ? `${p.value}i128`
+      : p.type === "u32" ? `${p.value}u32`
+      : p.value === "true" ? "true" : "false";
+    return `    map.set(soroban_sdk::Symbol::new(env, "${rustStr(p.key)}").into_val(env), ${val}.into_val(env));`;
+  });
+
+  return `
+/// Every declared install param EXCEPT "${rustStr(dropped.key)}", which is required
+/// configuration. A policy that substitutes a default for it rather than panicking is a policy
+/// whose bound can be removed by omitting one map entry.
+fn create_incomplete_params(env: &soroban_sdk::Env) -> soroban_sdk::Val {
+    let mut map = soroban_sdk::Map::<soroban_sdk::Val, soroban_sdk::Val>::new(env);
+${parts.join("\n")}
+    map.into_val(env)
+}
+`;
 }
 
 /**

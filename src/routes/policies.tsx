@@ -63,6 +63,22 @@ const STEPS = [
   { label: "Done", icon: "check" },
 ] as const;
 
+/**
+ * Every free-text note in the schema, labelled by where it came from.
+ *
+ * The generated suite is built from constraints and global rules, so no test covers a note. The
+ * builder says so while a note is typed; the test panel says so again next to the green, which is
+ * where a passing run is most likely to be read as "the policy does what I asked".
+ */
+function collectNotes(schema: PolicySchema): string[] {
+  return schema.contracts.flatMap(contract =>
+    contract.functions.flatMap(func => [
+      ...(func.note ? [`${func.name}(): ${func.note}`] : []),
+      ...func.args.flatMap(arg => (arg.note ? [`${func.name}(${arg.name}): ${arg.note}`] : [])),
+    ]),
+  );
+}
+
 function PolicyBuilder() {
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -949,7 +965,13 @@ function PolicyBuilder() {
 
         {step === 3 && (
           <>
-            <TestResults results={testResults} loading={loading} buildTimeline={buildTimeline} log={testLog} />
+            <TestResults
+              results={testResults}
+              loading={loading}
+              buildTimeline={buildTimeline}
+              log={testLog}
+              unverifiedNotes={collectNotes(schema)}
+            />
             <div className="flex gap-3">
               <button
                 onClick={handleBack}

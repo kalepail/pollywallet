@@ -182,7 +182,16 @@ export function extractPatterns(envelope: xdr.TransactionEnvelope): TxPattern[] 
   return patterns;
 }
 
-function scValToArg(val: xdr.ScVal): { type: string; value: string } {
+/** Reassemble a u256 from its four unsigned 64-bit limbs, high to low. */
+function u256Parts(parts: xdr.UInt256Parts): bigint {
+  return (BigInt(parts.hiHi().toString()) << 192n)
+    | (BigInt(parts.hiLo().toString()) << 128n)
+    | (BigInt(parts.loHi().toString()) << 64n)
+    | BigInt(parts.loLo().toString());
+}
+
+/** Exported for tests: building a whole envelope per scalar to reach it proves nothing extra. */
+export function scValToArg(val: xdr.ScVal): { type: string; value: string } {
   const typeName = val.switch().name;
 
   switch (typeName) {
@@ -197,6 +206,28 @@ function scValToArg(val: xdr.ScVal): { type: string; value: string } {
       const value = (hi << 64n) | lo;
       return { type: "i128", value: value.toString() };
     }
+    // The wide and time-typed scalars all fell through to "[complex]", so a real argument the
+    // analyzer could read perfectly well was shown to the user as an opaque token. Display only
+    // today — nothing derived from observedValues reaches the contract — but a value the UI
+    // cannot name is a value the user cannot check a bound against.
+    case "scvU128": {
+      const parts = val.u128();
+      return { type: "u128", value: ((BigInt(parts.hi().toString()) << 64n) | BigInt(parts.lo().toString())).toString() };
+    }
+    case "scvU256":
+      return { type: "u256", value: u256Parts(val.u256()).toString() };
+    case "scvI256": {
+      // Only the high limb is signed; the rest are magnitude, so rebuild from a signed hi.
+      const parts = val.i256();
+      const magnitude = (BigInt(parts.hiLo().toString()) << 128n)
+        | (BigInt(parts.loHi().toString()) << 64n)
+        | BigInt(parts.loLo().toString());
+      return { type: "i256", value: ((BigInt(parts.hiHi().toString()) << 192n) + magnitude).toString() };
+    }
+    case "scvTimepoint":
+      return { type: "timepoint", value: val.timepoint().toString() };
+    case "scvDuration":
+      return { type: "duration", value: val.duration().toString() };
     case "scvU64":
       return { type: "u64", value: val.u64().toString() };
     case "scvI64":

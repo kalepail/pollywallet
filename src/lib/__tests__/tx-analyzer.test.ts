@@ -6,7 +6,7 @@ import {
   TransactionBuilder,
   xdr,
 } from "@stellar/stellar-sdk";
-import { extractPatterns, summarizePattern } from "../tx-analyzer";
+import { extractPatterns, summarizePattern, scValToArg } from "../tx-analyzer";
 import type { TxPattern } from "../tx-analyzer";
 import { TESTNET_NETWORK_PASSPHRASE } from "../constants";
 
@@ -232,5 +232,37 @@ describe("summarizePattern", () => {
     expect(summary).not.toContain("→");
     expect(summary).toContain("args:");
     expect(summary).toContain("arg0:Address");
+  });
+});
+
+// These scalars all fell through to "[complex]" — a value the analyzer could read perfectly well
+// shown to the user as an opaque token. Display only, but a value the UI cannot name is a value
+// the user cannot check a bound against when they turn it into a constraint.
+describe("wide and time-typed scalars decode instead of reading [complex]", () => {
+  const arg = (v: xdr.ScVal) => scValToArg(v);
+
+  it("decodes u128, u256, i256, timepoint and duration", () => {
+    expect(arg(xdr.ScVal.scvU128(new xdr.UInt128Parts({
+      hi: xdr.Uint64.fromString("1"), lo: xdr.Uint64.fromString("0"),
+    })))).toEqual({ type: "u128", value: (1n << 64n).toString() });
+
+    expect(arg(xdr.ScVal.scvU256(new xdr.UInt256Parts({
+      hiHi: xdr.Uint64.fromString("0"), hiLo: xdr.Uint64.fromString("0"),
+      loHi: xdr.Uint64.fromString("0"), loLo: xdr.Uint64.fromString("7"),
+    })))).toEqual({ type: "u256", value: "7" });
+
+    expect(arg(xdr.ScVal.scvI256(new xdr.Int256Parts({
+      hiHi: xdr.Int64.fromString("0"), hiLo: xdr.Uint64.fromString("0"),
+      loHi: xdr.Uint64.fromString("0"), loLo: xdr.Uint64.fromString("9"),
+    })))).toEqual({ type: "i256", value: "9" });
+
+    expect(arg(xdr.ScVal.scvTimepoint(xdr.Uint64.fromString("1790000000"))))
+      .toEqual({ type: "timepoint", value: "1790000000" });
+    expect(arg(xdr.ScVal.scvDuration(xdr.Uint64.fromString("3600"))))
+      .toEqual({ type: "duration", value: "3600" });
+  });
+
+  it("still reports something for a type it genuinely cannot render", () => {
+    expect(arg(xdr.ScVal.scvLedgerKeyContractInstance()).value).toBe("[complex]");
   });
 });

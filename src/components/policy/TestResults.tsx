@@ -22,11 +22,19 @@ interface TestResultsProps {
   buildTimeline?: BuildAttempt[];
   /** Live cargo output while a build is running. */
   log?: string[];
+  /**
+   * Free-text notes in the schema. The generator builds tests from constraints and global rules
+   * only, so nothing here covers a note — an all-green run says nothing about whether the policy
+   * implements them. The builder warns while a note is typed; this is the same truth at the
+   * moment it matters most, when a passing suite is about to be read as "verified".
+   */
+  unverifiedNotes?: string[];
 }
 
-export default function TestResults({ results, loading, buildTimeline, log }: TestResultsProps) {
+export default function TestResults({ results, loading, buildTimeline, log, unverifiedNotes }: TestResultsProps) {
   const passed = results.filter((r) => r.passed).length;
   const failed = results.length - passed;
+  const notes = unverifiedNotes ?? [];
 
   return (
     <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6 space-y-4">
@@ -61,6 +69,26 @@ export default function TestResults({ results, loading, buildTimeline, log }: Te
               <Badge variant="error">{failed} failed</Badge>
             )}
           </div>
+
+          {/* What the green above does NOT cover. Stated here because this is where a passing
+              run gets read as "the policy does what I asked". */}
+          {notes.length > 0 && (
+            <div className="mb-4 border border-amber-500/40 bg-amber-500/5 rounded-xl p-3 space-y-1">
+              <p className="text-xs text-amber-300 flex items-center gap-2">
+                <Warning size={14} weight="bold" />
+                {notes.length} {notes.length === 1 ? "note is" : "notes are"} not covered by these tests
+              </p>
+              <ul className="text-xs text-gray-400 space-y-0.5 pl-5 list-disc">
+                {notes.map((note, i) => (
+                  <li key={i} className="truncate">{note}</li>
+                ))}
+              </ul>
+              <p className="text-xs text-gray-500">
+                Tests are generated from constraints and global rules. Whether the policy
+                implements a note is not checked — read the generated Rust for these.
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
             {results.map((result, index) => (
               <TestResultItem key={index} result={result} />

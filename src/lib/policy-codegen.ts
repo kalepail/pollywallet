@@ -561,8 +561,13 @@ COMMON MISTAKES TO AVOID:
   rejects every transaction it was meant to allow. A testnet ledger is roughly 5 seconds, but
   do NOT convert between the two; use the one the parameter is named for.
 - Key naming convention: "max_{arg_name}" for a range max, "min_{arg_name}" for a range min,
-  "threshold" for a signer threshold, "allowed_{arg_name}" for an allowlist flag. The exact key
-  list for this policy is given in the user message — use those names verbatim.
+  "allowed_{arg_name}" / "blocked_{arg_name}" / "exact_{arg_name}" as a bool flag that the
+  allowlist / blocklist / exact-value rule for that argument is configured, "threshold" for a
+  signer threshold, and "valid_after_ledger" / "valid_until_ledger" for a time window. The
+  flags carry no values — the permitted values themselves are compiled into your contract from
+  the schema — but they are still REQUIRED keys: their absence means the policy was installed
+  with configuration it was not built for, so panic. The exact key list for this policy is given
+  in the user message — use those names verbatim.
 - Arguments in the schema are listed in order (index 0, 1, 2, ...). When extracting args for enforcement, use the argument's position in the schema's function args list as the index. For example, if the schema lists args [from, to, amount], then from=args.get(0), to=args.get(1), amount=args.get(2).
 - For execute() wrapping, inner_args indices correspond to the argument positions in the schema (the schema already accounts for the execute wrapper).
 - The soroban-sdk auto-generates a \`PolicyContractClient\` type from \`#[contract] pub struct PolicyContract\` + \`#[contractimpl]\`. Tests use this client.
@@ -653,6 +658,16 @@ CONSTRAINT KINDS:
 - "range" { min?, max? }: The numeric argument must be within [min, max]. Panic if outside. Store limits via install_params so they can be reconfigured.
 - "allowlist" { values[] }: The argument must be one of the listed values. Panic otherwise.
 - "blocklist" { values[] }: The argument must NOT be one of the listed values. Panic if it matches.
+WHAT THE TEST HARNESS SENDS for an argument with no constraint: a well-formed, EMPTY value of
+that argument's real type — an empty Vec, an empty Map, empty Bytes, a zeroed BytesN, an empty
+String/Symbol, zero for every numeric type, and \`Val::VOID\` for an \`Option<...>\`, where VOID is
+the correct encoding of \`None\` rather than a placeholder. These are real values of the right
+ScVal type, not stand-ins, so code that decodes them works. But an empty container is not a
+MEANINGFUL value: if a note tells you to require something of it ("the path must have at least
+two hops"), a correct implementation of that note will reject the harness's empty Vec and fail
+the very test that proves your policy accepts a compliant call. Implement the note anyway — it
+is the user's stated intent, and a note is not verifiable by the harness either way.
+
 - "unconstrained" (or absent): No constraint — the argument may be ANY valid value. Do NOT restrict it, do NOT hardcode a value for it, and do NOT infer restrictions from its name, its type, or anything else in the schema JSON. If it also carries no note, ignore it COMPLETELY: do not decode it at all. Calling try_from_val on an argument you have no rule for buys nothing, and a failed decode panics — which aborts the whole transaction and fails the positive control every rejection test is built on, so the suite stops testing anything.
 
 CRITICAL: Only enforce constraints that are EXPLICITLY declared in the schema.

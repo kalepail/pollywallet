@@ -268,12 +268,30 @@ describe("install params: one convention, three consumers", () => {
     expect(keys).toContain("min_amount");
   });
 
+  /** Keys map.set(...) inside one generated helper fn, in emission order. */
+  const keysInHelper = (rust: string, fnName: string): string[] => {
+    const start = rust.indexOf(`fn ${fnName}(`);
+    if (start === -1) return [];
+    const body = rust.slice(start, rust.indexOf("\nfn ", start + 1));
+    return [...body.matchAll(/Symbol::new\(env, "([a-z0-9_]+)"\)\.into_val\(env\), /g)].map(m => m[1]);
+  };
+
   it("the prompt's declared keys and the generated tests' installed keys are identical", () => {
     const declared = installParamsSpec(schema).map(p => p.key).sort();
-    // What the generated Rust actually calls map.set(...) with.
-    const generated = [...generateTestCases(schema).matchAll(/Symbol::new\(env, "([a-z0-9_]+)"\)\.into_val\(env\), /g)]
-      .map(m => m[1]).sort();
-    expect(generated).toEqual(declared);
+    // Scoped to create_test_params: create_incomplete_params deliberately omits one key, and
+    // scraping the whole file would fold that omission into the comparison and hide real drift.
+    expect(keysInHelper(generateTestCases(schema), "create_test_params").sort()).toEqual(declared);
+  });
+
+  // The fail-closed install test is only worth anything if the map it installs is complete
+  // except for ONE required, value-carrying key. Drop none and it is a duplicate of the happy
+  // path; drop a bool flag and a policy that reasonably ignores a valueless flag fails.
+  it("the incomplete params helper omits exactly one value-carrying key", () => {
+    const declared = installParamsSpec(schema);
+    const emitted = keysInHelper(generateTestCases(schema), "create_incomplete_params");
+    const missing = declared.map(p => p.key).filter(k => !emitted.includes(k));
+    expect(missing).toHaveLength(1);
+    expect(declared.find(p => p.key === missing[0])!.type).not.toBe("bool");
   });
 });
 
@@ -837,5 +855,38 @@ describe("every allowlisted value gets its own acceptance test", () => {
       generateTestCases(schema).indexOf("fn test_enforce_c0_f0_to_not_allowlisted"),
     );
     for (const value of [A, B, C]) expect(rejection).toContain(value); // the while-loop guard
+  });
+});
+
+// ident() strips anything that is not [A-Za-z0-9_], so "a-b" and "a_b" collapse to one token.
+// Two constrained args that collapse together emitted two Rust fns with the same name — fail
+// closed, but as an opaque compile error naming nothing in the schema.
+describe("argument names that collapse to one Rust identifier stay distinct", () => {
+  const withArgNames = (names: string[]): PolicySchema => ({
+    $schema: SCHEMA_VERSION,
+    name: "ident-collision",
+    description: "collision fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{
+        name: "transfer",
+        args: names.map(name => ({
+          name, type: "i128", constraint: { kind: "range" as const, max: "100" },
+        })),
+      }],
+    }],
+  });
+
+  it("emits no duplicate test fn name when two args collapse to the same token", () => {
+    const rust = generateTestCases(withArgNames(["a-b", "a_b"]));
+    const names = [...rust.matchAll(/fn (test_\w+)\(/g)].map(m => m[1]);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("leaves the readable name alone when there is no collision", () => {
+    // Disambiguation is the exception, not a rename of every test.
+    expect(generateTestCases(withArgNames(["amount", "fee"])))
+      .toContain("fn test_enforce_c0_f0_amount_exceeds_max");
   });
 });

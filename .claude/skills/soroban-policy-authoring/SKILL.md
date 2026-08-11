@@ -548,6 +548,22 @@ Rules for anything you add:
 - Scope test names with the `c{i}_f{j}` index — two functions sharing an argument name
   otherwise emit duplicate Rust fns and the crate fails to compile.
 - A run that parsed **zero** tests is a failure, not a pass (`[].every()` is `true`).
+- Test the LIFECYCLE, not only `enforce`. `install` and `uninstall` require the account's auth
+  too, and only `enforce` was checked — so a policy could be pre-installed against a predictable
+  `(account, rule id)` before the owner got there, or have its configuration deleted by anyone.
+- Prove the install FAILS CLOSED. Every other test installs a complete, well-formed map, so
+  nothing else can see a permissive default: `test_install_rejects_void_params` and
+  `test_install_rejects_missing_required_param` install nothing and a map with one required
+  bound removed. The key dropped is always value-carrying (i128/u32), never a bool flag — a
+  policy that ignores a valueless flag is untidy, but one that cannot find `max_amount` and
+  carries on with `unwrap_or(i128::MAX)` has had its limit removed by omitting one map entry.
+- Reject an unknown inner call inside an **execute wrapper** (Shape B). Every other context is a
+  direct call, and a mutant that validated Shape A correctly while accepting any outer `execute`
+  passed the whole suite. Negative-only, deliberately: a policy that refuses execute contexts
+  outright is also correct and fails closed, so asserting a Shape B call is ACCEPTED would fail
+  a sound policy. Both readings agree the unlisted inner call must be rejected. Not reachable in
+  this app today — only `CallContract` rules are deployed — and live the moment a generated
+  policy is attached to a `Default` rule.
 
 Verify changes with mutation testing, not just by reading the output. Take a policy known to
 compile, gut its `enforce()` to `{}` (keeping `require_auth`), and confirm the suite fails;
