@@ -24,6 +24,22 @@ const CONSTRAINT_LABELS: Record<ArgConstraintKind, string> = {
   blocklist: "Blocklist",
 };
 
+/**
+ * Notes are prose handed to the code generator, and NOTHING downstream checks that the policy
+ * honoured them: `generateTestCases()` builds tests from constraints and global rules only, so a
+ * generated policy that ignores every note passes the whole suite. Constraints get a rejection
+ * test with a real counterexample; notes get a hope. Say so where the note is typed — a
+ * constraint the user believes in but nothing enforces is worse than one they never asked for.
+ */
+function UnverifiedNoteWarning() {
+  return (
+    <p className="mt-1 text-xs text-amber-400/80">
+      Not verified. The test suite only proves this function's argument constraints — nothing
+      checks that the generated policy implements this note. Use a constraint where one fits.
+    </p>
+  );
+}
+
 // --- Global rule labels & descriptions ---
 
 const GLOBAL_RULE_LABELS: Record<GlobalRuleType, string> = {
@@ -33,7 +49,7 @@ const GLOBAL_RULE_LABELS: Record<GlobalRuleType, string> = {
 };
 
 const GLOBAL_RULE_DESCRIPTIONS: Record<GlobalRuleType, string> = {
-  threshold: "Require N-of-M signers to approve",
+  threshold: "Require the delegated key to have authenticated",
   weighted_threshold: "Weighted signer threshold approval",
   time_lock: "Restrict to a ledger number window",
 };
@@ -221,6 +237,7 @@ function FunctionCard({
             rows={2}
             className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-violet-500 transition-colors resize-none"
           />
+          <UnverifiedNoteWarning />
         </div>
       )}
 
@@ -360,13 +377,16 @@ function ArgRow({
 
       {/* Per-arg note */}
       {showNote && (
-        <textarea
-          placeholder="Guidance for this argument..."
-          value={arg.note ?? ""}
-          onChange={(e) => onChange({ ...arg, note: e.target.value || undefined })}
-          rows={1}
-          className="w-full px-2 py-1.5 bg-slate-700/30 border border-slate-700 rounded text-white text-xs placeholder-gray-600 focus:outline-none focus:border-violet-500 transition-colors resize-none"
-        />
+        <div>
+          <textarea
+            placeholder="Guidance for this argument..."
+            value={arg.note ?? ""}
+            onChange={(e) => onChange({ ...arg, note: e.target.value || undefined })}
+            rows={1}
+            className="w-full px-2 py-1.5 bg-slate-700/30 border border-slate-700 rounded text-white text-xs placeholder-gray-600 focus:outline-none focus:border-violet-500 transition-colors resize-none"
+          />
+          <UnverifiedNoteWarning />
+        </div>
       )}
     </div>
   );
@@ -577,13 +597,23 @@ export function GlobalRuleCard({ rule, onChange, onRemove }: GlobalRuleCardProps
 function GlobalRuleParams({ rule, onChange }: { rule: GlobalRule; onChange: (updated: GlobalRule) => void }) {
   switch (rule.type) {
     case "threshold":
+      // Only 1 is satisfiable, and validateSchema refuses anything higher — a policy rule is
+      // deployed with exactly one signer (the ephemeral key) and signers can only be removed
+      // from it, so a higher threshold installs and then rejects every transaction. Say that
+      // here rather than letting the user type 2 and meet the wall at generate time.
       return (
-        <ParamInput
-          label="Required signatures"
-          placeholder="e.g. 2"
-          value={String(rule.params.threshold)}
-          onChange={(v) => onChange({ type: "threshold", params: { threshold: safeInt(v) } })}
-        />
+        <div>
+          <ParamInput
+            label="Required signatures"
+            placeholder="1"
+            value={String(rule.params.threshold)}
+            onChange={(v) => onChange({ type: "threshold", params: { threshold: safeInt(v) } })}
+          />
+          <p className="mt-1 text-xs text-gray-500">
+            Must be 1. The rule carries a single delegated key, so a higher threshold could never
+            be met on-chain.
+          </p>
+        </div>
       );
     case "weighted_threshold":
       return (
@@ -644,7 +674,7 @@ export function getDefaultContract(): ContractPermission {
 export function getDefaultGlobalRule(type: GlobalRuleType): GlobalRule {
   switch (type) {
     case "threshold":
-      return { type, params: { threshold: 0 } };
+      return { type, params: { threshold: 1 } };
     case "weighted_threshold":
       return { type, params: { threshold: 0, weights: [] } };
     case "time_lock":

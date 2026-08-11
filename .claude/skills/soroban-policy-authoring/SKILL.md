@@ -166,9 +166,52 @@ both are the same defect: the schema could express something the deployment path
   listed contract before the policy is consulted, so permissions 2..N are inert while the UI
   reports a successful install. Split them into separate policies.
 
+Added 2026-08-11, same rule, found by a six-model adversarial review of the harness itself:
+
+* **`threshold` above 1.** `buildAddContextRuleTx` attaches exactly ONE signer to a policy rule
+  — the ephemeral ed25519 key — and `rule-management.ts` can only *remove* signers, never add
+  them. So `authenticated_signers` can never exceed 1 for a rule carrying a policy. A threshold
+  of 2 either fails `install` (the OZ pattern validates `threshold <= context_rule.signers.len()`)
+  or installs and then rejects every real transaction — in both cases after the suite passed and
+  the policy deployed, with `(Auth, InvalidAction)` naming neither. The generated tests happily
+  fabricate N synthetic signers, so they prove nothing about what deployment can produce.
+  Threshold 1 stays meaningful: a policy-only rule can authenticate zero signers. Re-open this
+  when a rule can carry more than one delegated key.
+* **Two global rules of the same type.** The generator emits a fixed set of test fn names per
+  rule type, so a duplicate produced two Rust fns with one name and the whole crate failed to
+  compile — an opaque build failure naming nothing in the schema. Install params are a flat map
+  besides, so the second rule silently overwrote the first.
+* **Global-rule numbers that are not whole in-range u32s.** `threshold: 1.5` passed the old
+  `< 1` check and reached the generated Rust as `const REQUIRED_SIGNERS: u32 = 1.5;`;
+  `validUntilLedger: u32::MAX` made the past-the-window test emit `4294967296`
+  (`error: literal out of range`). Same family as the constraint-value checks above it: any
+  number that lands in generated source is validated where it is entered.
+
 The general rule: if the harness cannot write a test that fails against a policy ignoring the
 feature, the feature does not ship. A decorative constraint is worse than a missing one,
 because the user believes it.
+
+The one live exception is **argument and function `note`s**, and it is deliberate. A note can be
+honoured — unlike a weighted threshold, which deployment cannot even express — but nothing
+proves it was: `generateTestCases()` builds tests from constraints and global rules only, so a
+policy ignoring every note passes the entire suite. Notes stay because they are the only way to
+express a rolling window or a rate limit, and the Policy Builder now says "Not verified" under
+every note editor (`RuleCard.tsx`, `UnverifiedNoteWarning`). If that honesty ever stops being
+enough, the fix is a deterministic test for the note's behaviour, not a quieter warning.
+
+A note cuts the other way too, which is the part that surprises people: the harness builds
+positive controls from the schema's *constraints*, so a note the generator faithfully
+implements can make a CORRECT policy fail its own positive tests. "amount must be positive" on
+an otherwise unconstrained `i128` is the clean example — `generateArgBuilderLines` supplies `0`,
+the compliant call is rejected, and the run fails while the policy is right. Prefer a
+constraint; reach for a note only when no constraint can say it.
+
+**Verify harness changes with a real cargo build, not by reading the output.** The loop that
+found and settled all of the above: emit `generateTestCases(schema)` to a file, append it to a
+hand-written correct policy under `#[cfg(test)] mod tests`, `cargo test` (fast — no wasm target
+needed), and confirm 16/16. Then perl-mutate one behaviour at a time and confirm each mutant
+fails EXACTLY the test that claims to catch it. A test that no mutant can fail is decoration;
+a test a correct policy fails is worse.
 
 ## A policy rule is an authorization alternative, not a wallet firewall
 
@@ -433,6 +476,13 @@ empty passes everything else:
 - `test_enforce_requires_smart_account_auth` — every other test runs under
   `mock_all_auths()`, which hides a missing `require_auth()`. This one uses
   `env.set_auths(&[])`.
+- `test_enforce_rejects_other_smart_account` / `test_enforce_rejects_other_context_rule` — a
+  deployed policy is multi-tenant, so its state must be keyed by
+  `(smart_account, context_rule.id)`. `test_enforce_before_install_is_rejected` looks like it
+  proves this and does not: a policy keyed by rule id alone, or globally, has no state there
+  either and panics for a right-looking reason. Only installing for ONE (account, rule) and then
+  enforcing for a neighbour separates them. Mutation-verified: keying by rule id alone fails
+  exactly the first, keying by account alone fails exactly the second.
 
 Rules for anything you add:
 
@@ -440,11 +490,22 @@ Rules for anything you add:
   satisfied by *any* panic — including one from install, address decoding, or argument
   conversion — so a policy can pass a rejection test without ever rejecting anything.
 - Open every negative test with a **positive control**: the compliant call must succeed
-  first, so the failure is attributable to the mutation and not to broken setup.
+  first, so the failure is attributable to the mutation and not to broken setup. Run that
+  control on its OWN policy instance — `positive_control()` registers a second
+  `PolicyContract`. The control is a real `enforce()`, and a stateful policy (rolling sum, rate
+  limit, spending cap) mutates state when it runs, so a shared instance let the control consume
+  the budget and the rejection then fired for exhaustion rather than for the mutated argument,
+  passing while proving nothing. Mutation-verified: a globally-keyed policy that accepts one
+  call per instance passes the whole suite with a shared control, and fails
+  `test_enforce_rejects_other_smart_account` with an isolated one.
 - Build a context per `(contract, function)`. Reusing `contracts[0].functions[0]` meant a
   test nominally about contract #2 actually sent contract #1's context.
 - Generate both sides of every boundary. An allowlist that only tests the allowed value is
-  passed by a policy that allows everything.
+  passed by a policy that allows everything. **`exact` has two sides too**: it is equality, so
+  a lone counterexample at `value + 1` is passed by `if x > value { panic }` — a bound where
+  equality was asked for — leaving every value below it spendable. `outsideBound(value,
+  "below")` supplies the other side and returns null for non-numeric types and at the type
+  floor, where no counterexample is representable.
 - Generate one test per value in a list, not one per list. A blocklist that only exercised
   `values[0]` was passed by a mutant rejecting the first address and accepting the second —
   which is the shape a model most often writes when handed a list.

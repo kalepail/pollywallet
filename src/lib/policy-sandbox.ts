@@ -146,9 +146,15 @@ use soroban_sdk::{IntoVal, TryFromVal, FromVal};
 const REQUIRED_SIGNERS: u32 = ${requiredSigners};
 
 fn create_test_context_rule(env: &soroban_sdk::Env) -> ContextRule {
+    create_test_context_rule_with_id(env, 1)
+}
+
+/// A rule identical to the fixture but with a different id, so a policy that keys its state by
+/// rule id alone — or globally — can be told apart from one keyed by (smart_account, rule id).
+fn create_test_context_rule_with_id(env: &soroban_sdk::Env, id: u32) -> ContextRule {
     let contract_addr = ${contractAddrExpr};
     ContextRule {
-        id: 1,
+        id,
         context_type: ContextRuleType::CallContract(contract_addr),
         name: soroban_sdk::String::from_str(env, "test-rule"),
         // Must be non-empty and at least REQUIRED_SIGNERS long: policies validate
@@ -165,6 +171,28 @@ fn create_test_context_rule(env: &soroban_sdk::Env) -> ContextRule {
 /// The signer set every positive call and every positive control uses.
 fn fixture_signers(env: &soroban_sdk::Env) -> soroban_sdk::Vec<Signer> {
     create_test_signers(env, REQUIRED_SIGNERS)
+}
+
+/// Run a rejection test's positive control on its OWN policy instance.
+///
+/// The control exists to prove setup is sound, but it is a real enforce() and a stateful policy
+/// — a rolling sum, a rate limit, a spending cap — MUTATES state when it runs. Sharing an
+/// instance with the call under test meant the control could consume the budget and the
+/// rejection then fired for exhaustion rather than for the mutated argument, so the test passed
+/// while proving nothing. A separate instance keeps the assertion attributable in both
+/// directions: the control still proves install and the compliant call work, and the call under
+/// test still meets a freshly installed policy.
+fn positive_control(
+    env: &soroban_sdk::Env,
+    context: &Context,
+    signers: &soroban_sdk::Vec<Signer>,
+    context_rule: &ContextRule,
+    smart_account: &Address,
+) {
+    let control_id = env.register(PolicyContract, ());
+    let control = PolicyContractClient::new(env, &control_id);
+    control.install(&create_test_params(env), context_rule, smart_account);
+    control.enforce(context, signers, context_rule, smart_account);
 }
 
 /// Move the ledger inside any declared time-lock window. Without this the ledger stays at 0
@@ -286,7 +314,7 @@ fn test_enforce_rejects_unknown_function() {
     // Positive control: the permitted call must succeed, so a failure below is
     // attributable to the unknown function rather than to broken setup.
     let ok_ctx = create_function_context(&env, build_default_args(&env));
-    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
 
     let context = create_unknown_function_context(&env, build_default_args(&env));
     let signers = fixture_signers(&env);
@@ -309,7 +337,7 @@ fn test_enforce_rejects_unknown_contract() {
     let context_rule = create_test_context_rule(&env);
     client.install(&create_test_params(&env), &context_rule, &smart_account);
     let ok_ctx = create_function_context(&env, build_default_args(&env));
-    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
 
     let context = create_unknown_contract_context(&env, build_default_args(&env));
     let signers = fixture_signers(&env);
@@ -365,6 +393,61 @@ fn test_enforce_before_install_is_rejected() {
     );
 }`);
 
+  // --- MULTI-TENANCY ---
+  // One deployed policy serves many smart accounts and many context rules, so its state must be
+  // keyed by (smart_account, context_rule.id). `test_enforce_before_install_is_rejected` does not
+  // prove that: a policy keyed by rule id alone, or globally, has no state there either and
+  // panics for the right-looking reason. These two install for ONE (account, rule) and then
+  // enforce for a neighbour, which only a correctly-keyed policy rejects. Without them, one
+  // account's install silently configures every other account's calls.
+  tests.push(`
+#[test]
+fn test_enforce_rejects_other_smart_account() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let other_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    // Positive control: the installing account's own compliant call must succeed.
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    let context = create_function_context(&env, build_default_args(&env));
+    assert!(
+        client.try_enforce(&context, &fixture_signers(&env), &context_rule, &other_account).is_err(),
+        "enforce() succeeded for a smart account that never installed this policy — state must \\
+         be keyed by (smart_account, context_rule.id), so one account's install cannot configure \\
+         another's"
+    );
+}`);
+
+  tests.push(`
+#[test]
+fn test_enforce_rejects_other_context_rule() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_fixture_ledger(&env);
+    let contract_id = env.register(PolicyContract, ());
+    let client = PolicyContractClient::new(&env, &contract_id);
+    let smart_account = Address::generate(&env);
+    let context_rule = create_test_context_rule(&env);
+    client.install(&create_test_params(&env), &context_rule, &smart_account);
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+
+    let other_rule = create_test_context_rule_with_id(&env, 2);
+    let context = create_function_context(&env, build_default_args(&env));
+    assert!(
+        client.try_enforce(&context, &fixture_signers(&env), &other_rule, &smart_account).is_err(),
+        "enforce() succeeded for a context rule this policy was never installed on — state must \\
+         be keyed by (smart_account, context_rule.id), not by the account alone"
+    );
+}`);
+
   tests.push(`
 #[test]
 fn test_double_install_is_rejected() {
@@ -408,6 +491,20 @@ fn test_double_install_is_rejected() {
                 argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: wrongValue }, useConstraintValues: true }),
                 ctxFn, argsFn,
                 why: `enforce() accepted ${arg.name} with a value other than the required exact value`,
+              }));
+            }
+            // A numeric exact needs BOTH sides. The counterexample above is the only one
+            // generated, and `if x > value { panic }` — a bound check where an equality check was
+            // asked for — rejects it and passes. Everything below the value stays spendable.
+            // outsideBound returns null for non-numeric types and at the type's floor, where no
+            // counterexample exists.
+            const belowExact = outsideBound(arg.constraint.value, "below", arg.type);
+            if (belowExact && belowExact !== wrongValue) {
+              tests.push(rejectionTest({
+                name: `test_enforce_${suffix}_${ident(arg.name)}_below_exact_value`,
+                argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: belowExact }, useConstraintValues: true }),
+                ctxFn, argsFn,
+                why: `enforce() accepted ${arg.name} below the required exact value of ${arg.constraint.value} — an exact constraint is equality, not an upper bound`,
               }));
             }
             break;
@@ -510,9 +607,14 @@ fn test_enforce_with_enough_signers() {
     client.enforce(&context, &signers, &context_rule, &smart_account);
 }`);
 
+        // try_enforce + is_err, never bare #[should_panic]. Measured, so the reason is stated
+        // accurately: the old bare form DID catch a policy that skipped the signer check —
+        // returning instead of panicking fails should_panic. What it could not distinguish was
+        // WHERE the panic came from, so a panic in install or argument conversion satisfied it
+        // while nothing counted signers. The positive control at the threshold closes that, and
+        // makes a correct threshold-N policy's failure attributable to the count.
         tests.push(`
 #[test]
-#[should_panic]
 fn test_enforce_insufficient_signers() {
     let env = Env::default();
     env.mock_all_auths();
@@ -522,10 +624,17 @@ fn test_enforce_insufficient_signers() {
     let smart_account = Address::generate(&env);
     let context_rule = create_test_context_rule(&env);
     client.install(&create_test_params(&env), &context_rule, &smart_account);
-    let args = build_default_args(&env);
-    let context = create_function_context(&env, args);
+    // Positive control at the threshold, so the assertion below is attributable to the
+    // signer count and not to broken setup.
+    let ok_ctx = create_function_context(&env, build_default_args(&env));
+    positive_control(&env, &ok_ctx, &create_test_signers(&env, ${rule.params.threshold}), &context_rule, &smart_account);
+
+    let context = create_function_context(&env, build_default_args(&env));
     let signers = create_test_signers(&env, ${Math.max(0, rule.params.threshold - 1)});
-    client.enforce(&context, &signers, &context_rule, &smart_account);
+    assert!(
+        client.try_enforce(&context, &signers, &context_rule, &smart_account).is_err(),
+        "enforce() accepted ${Math.max(0, rule.params.threshold - 1)} signer(s) against a declared threshold of ${rule.params.threshold}"
+    );
 }`);
         break;
 
@@ -553,7 +662,7 @@ fn test_enforce_after_window_is_rejected() {
     client.install(&create_test_params(&env), &context_rule, &smart_account);
     // Positive control inside the window, so a failure below is about the ledger and not setup.
     let ok_ctx = create_function_context(&env, build_default_args(&env));
-    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
 
     env.ledger().with_mut(|l| l.sequence_number = ${until + 1});
     let context = create_function_context(&env, build_default_args(&env));
@@ -579,7 +688,7 @@ fn test_enforce_before_window_is_rejected() {
     let context_rule = create_test_context_rule(&env);
     client.install(&create_test_params(&env), &context_rule, &smart_account);
     let ok_ctx = create_function_context(&env, build_default_args(&env));
-    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
 
     env.ledger().with_mut(|l| l.sequence_number = ${Math.max(0, after - 1)});
     let context = create_function_context(&env, build_default_args(&env));
@@ -610,24 +719,10 @@ fn test_enforce_within_time_window() {
         break;
       }
 
-      case "weighted_threshold":
-        tests.push(`
-#[test]
-fn test_enforce_weighted_threshold() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_fixture_ledger(&env);
-    let contract_id = env.register(PolicyContract, ());
-    let client = PolicyContractClient::new(&env, &contract_id);
-    let smart_account = Address::generate(&env);
-    let context_rule = create_test_context_rule(&env);
-    client.install(&create_test_params(&env), &context_rule, &smart_account);
-    let args = build_default_args(&env);
-    let context = create_function_context(&env, args);
-    let signers = create_test_signers(&env, ${rule.params.weights.length});
-    client.enforce(&context, &signers, &context_rule, &smart_account);
-}`);
-        break;
+      // No weighted_threshold case. validateSchema() refuses the rule type outright and runs
+      // before this generator, so the branch was unreachable — and what it emitted was a
+      // positive-only test that any policy ignoring the rule passed, which is the reason the
+      // rule type was refused in the first place.
     }
   }
 
@@ -681,7 +776,7 @@ fn ${name}() {
     // Positive control: the compliant call must succeed, so the assertion below is
     // attributable to the mutated argument and not to broken setup.
     let ok_ctx = ${ctxFn}(&env, ${argsFn}(&env));
-    client.enforce(&ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
+    positive_control(&env, &ok_ctx, &fixture_signers(&env), &context_rule, &smart_account);
 
     let mut args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
 ${argLines}

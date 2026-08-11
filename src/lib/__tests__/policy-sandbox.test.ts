@@ -611,3 +611,173 @@ describe("argument type honesty", () => {
     }
   });
 });
+
+// A deployed policy is multi-tenant: one contract serves many smart accounts and many context
+// rules. Nothing else in the suite falsifies that. `test_enforce_before_install_is_rejected`
+// looks like it does and does not — a policy keyed by rule id alone, or globally, has no state
+// there either and panics for a right-looking reason. Only installing for ONE (account, rule)
+// and then enforcing for a neighbour tells them apart. Verified by mutation against a real
+// cargo build: keying by rule id alone fails exactly test_enforce_rejects_other_smart_account,
+// keying by account alone fails exactly test_enforce_rejects_other_context_rule, and a
+// correctly-keyed policy passes both.
+describe("multi-tenancy is falsifiable", () => {
+  const schema: PolicySchema = {
+    $schema: SCHEMA_VERSION,
+    name: "tenancy",
+    description: "no constraints at all",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "transfer", args: [] }],
+    }],
+  };
+
+  it("emits both neighbour tests for every schema, constrained or not", () => {
+    const rust = generateTestCases(schema);
+    expect(rust).toContain("fn test_enforce_rejects_other_smart_account");
+    expect(rust).toContain("fn test_enforce_rejects_other_context_rule");
+  });
+
+  it("enforces for a DIFFERENT account and a DIFFERENT rule id, after a positive control", () => {
+    const rust = generateTestCases(schema);
+    const byAccount = rust.slice(rust.indexOf("fn test_enforce_rejects_other_smart_account"));
+    expect(byAccount).toContain("let other_account = Address::generate(&env);");
+    // Positive control first, then the neighbour must be rejected.
+    expect(byAccount.indexOf("positive_control(&env, &ok_ctx")).toBeLessThan(byAccount.indexOf("try_enforce"));
+    expect(byAccount).toContain("&context_rule, &other_account).is_err()");
+
+    const byRule = rust.slice(rust.indexOf("fn test_enforce_rejects_other_context_rule"));
+    expect(byRule).toContain("create_test_context_rule_with_id(&env, 2)");
+    expect(byRule).toContain("&other_rule, &smart_account).is_err()");
+  });
+
+  it("keeps the fixture rule at id 1 so the neighbour id is genuinely different", () => {
+    const rust = generateTestCases(schema);
+    expect(rust).toContain("create_test_context_rule_with_id(env, 1)");
+  });
+});
+
+// An `exact` constraint is equality. A single counterexample ABOVE the value is passed by a
+// policy that implements `if x > value { panic }` — a bound where equality was asked for — and
+// every value below stays spendable. Mutation-verified: that mutant fails only the below test.
+describe("exact constraints are tested on both sides", () => {
+  const withExact = (type: string, value: string): PolicySchema => ({
+    $schema: SCHEMA_VERSION,
+    name: "exact-both-sides",
+    description: "exact fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "call", args: [{ name: "value", type, constraint: { kind: "exact", value } }] }],
+    }],
+  });
+
+  it("emits an above AND a below counterexample for a numeric exact", () => {
+    const rust = generateTestCases(withExact("i128", "100"));
+    expect(rust).toContain("fn test_enforce_c0_f0_value_wrong_value");
+    expect(rust).toContain("fn test_enforce_c0_f0_value_below_exact_value");
+    expect(rust).toContain("args.push_back(101i128.into_val(&env)); // value (overridden)");
+    expect(rust).toContain("args.push_back(99i128.into_val(&env)); // value (overridden)");
+  });
+
+  it("parenthesises a negative below-counterexample so the literal compiles", () => {
+    // `-1i128.into_val(&env)` parses as `-(1i128.into_val(&env))` and fails with E0600.
+    expect(generateTestCases(withExact("i128", "0"))).toContain("args.push_back((-1i128).into_val(&env))");
+  });
+
+  it("skips the below test at the type floor, where no counterexample is representable", () => {
+    const rust = generateTestCases(withExact("u32", "0"));
+    expect(rust).toContain("fn test_enforce_c0_f0_value_wrong_value");
+    expect(rust).not.toContain("below_exact_value");
+    expect(rust).not.toContain("-1u32");
+  });
+
+  it("adds nothing for a non-numeric exact, which has no ordering", () => {
+    const address = generateTestCases(withExact("address", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"));
+    expect(address).toContain("fn test_enforce_c0_f0_value_wrong_value");
+    expect(address).not.toContain("below_exact_value");
+    expect(generateTestCases(withExact("bool", "true"))).not.toContain("below_exact_value");
+  });
+});
+
+// validateSchema() refuses weighted_threshold outright and always runs before this generator, so
+// the branch that emitted a positive-only test for it was unreachable — and a positive-only test
+// is precisely why the rule type was refused. Nothing should reintroduce one.
+describe("no test is emitted for a refused rule type", () => {
+  it("never emits a weighted-threshold test", () => {
+    const schema: PolicySchema = {
+      $schema: SCHEMA_VERSION,
+      name: "weighted",
+      description: "refused rule type",
+      contracts: [{
+        address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        functions: [{ name: "transfer", args: [] }],
+      }],
+      globalRules: [{ type: "weighted_threshold", params: { threshold: 2, weights: [] } }],
+    };
+    expect(validateSchema(schema).valid).toBe(false);
+    expect(generateTestCases(schema)).not.toContain("weighted");
+  });
+
+  it("asserts on the threshold call itself rather than swallowing any panic", () => {
+    const schema: PolicySchema = {
+      $schema: SCHEMA_VERSION,
+      name: "threshold-strict",
+      description: "threshold fixture",
+      contracts: [{
+        address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        functions: [{ name: "transfer", args: [] }],
+      }],
+      // 1 is the only threshold validateSchema now accepts — a policy rule is deployed with
+      // exactly one signer — so pin the shape that can actually reach the sandbox.
+      globalRules: [{ type: "threshold", params: { threshold: 1 } }],
+    };
+    expect(validateSchema(schema).valid).toBe(true);
+    const rust = generateTestCases(schema);
+    // No bare should_panic anywhere, including the threshold branch.
+    expect(rust).not.toContain("#[should_panic]");
+    const test = rust.slice(rust.indexOf("fn test_enforce_insufficient_signers"));
+    expect(test).toContain("create_test_signers(&env, 1), &context_rule, &smart_account)"); // control
+    expect(test).toContain("create_test_signers(&env, 0)"); // the negative: no signers at all
+    expect(test).toContain("try_enforce");
+  });
+});
+
+// A positive control is a REAL enforce(), and a stateful policy mutates state when it runs.
+// Sharing an instance with the call under test let the control consume the budget, so the
+// rejection fired for exhaustion rather than for the mutated argument and the test passed while
+// proving nothing. Mutation-verified against a real cargo build: a globally-keyed, one-call
+// policy survived every tenancy test with a shared control and is caught with an isolated one.
+describe("positive controls cannot poison the call under test", () => {
+  const schema: PolicySchema = {
+    $schema: SCHEMA_VERSION,
+    name: "isolation",
+    description: "control isolation fixture",
+    globalRules: [{ type: "threshold", params: { threshold: 1 } }],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{
+        name: "transfer",
+        args: [{ name: "amount", type: "i128", constraint: { kind: "range", max: "1000" } }],
+      }],
+    }],
+  };
+
+  it("runs every control on its own freshly registered policy instance", () => {
+    const rust = generateTestCases(schema);
+    expect(rust).toContain("fn positive_control(");
+    expect(rust).toContain("let control_id = env.register(PolicyContract, ());");
+    // No control may go through the same client the assertion under test uses.
+    expect(rust).not.toContain("client.enforce(&ok_ctx");
+  });
+
+  it("routes every rejection test's control through the isolated helper", () => {
+    const rust = generateTestCases(schema);
+    const controls = rust.match(/positive_control\(&env, &ok_ctx/g)?.length ?? 0;
+    const assertions = rust.match(/try_enforce\(&context/g)?.length ?? 0;
+    // Every ok_ctx built is handed to the helper, and there is one control per rejection.
+    expect(rust.match(/let ok_ctx =/g)?.length ?? 0).toBe(controls);
+    expect(controls).toBeGreaterThan(0);
+    expect(assertions).toBeGreaterThanOrEqual(controls);
+  });
+});

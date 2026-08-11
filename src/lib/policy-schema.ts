@@ -328,12 +328,27 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
 
   // Global rules validation
   if (Array.isArray(schema.globalRules)) {
+    const seenTypes = new Set<GlobalRuleType>();
     for (let i = 0; i < schema.globalRules.length; i++) {
       const rule = schema.globalRules[i];
       if (!VALID_GLOBAL_RULE_TYPES.includes(rule.type)) {
         errors.push(`Global Rule ${i}: invalid type "${rule.type}"`);
         continue;
       }
+      // One rule per type. The test generator emits a fixed set of test fns per rule, so two
+      // rules of the same type produce two Rust fns with the same name and the whole crate
+      // fails to compile — reported as an opaque build failure with nothing pointing at the
+      // schema. Two rules of one type also have no meaning: the second silently wins in
+      // install params, which are a flat map.
+      if (seenTypes.has(rule.type)) {
+        errors.push(
+          `Global Rule ${i}: a second "${rule.type}" rule. Only one rule of each type is ` +
+          `supported — install params are a flat map and the generated tests are named per ` +
+          `rule type, so a duplicate would overwrite the first and break the build.`
+        );
+        continue;
+      }
+      seenTypes.add(rule.type);
       const ruleErrors = validateGlobalRule(rule, `Global Rule ${i}`);
       errors.push(...ruleErrors);
     }
@@ -459,13 +474,37 @@ function validateConstraint(
   return errors;
 }
 
+/** A real, whole, in-range u32 — what every global-rule number becomes in the generated Rust. */
+function isU32(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff;
+}
+
 function validateGlobalRule(rule: GlobalRule, prefix: string): string[] {
   const errors: string[] = [];
 
   switch (rule.type) {
     case "threshold": {
-      if (typeof rule.params.threshold !== "number" || rule.params.threshold < 1) {
-        errors.push(`${prefix}: threshold must be a positive integer`);
+      // `< 1` alone let 1.5 through, which reaches the generated tests as
+      // `const REQUIRED_SIGNERS: u32 = 1.5;` and `create_test_signers(&env, 1.5)`, and reaches
+      // the deploy path as `BigInt("1.5")`, which throws. Neither names the schema.
+      if (!isU32(rule.params.threshold) || rule.params.threshold < 1) {
+        errors.push(`${prefix}: threshold must be a whole number of at least 1`);
+      } else if (rule.params.threshold > 1) {
+        // Refused for the same reason as weighted_threshold: nothing downstream can satisfy it.
+        // buildAddContextRuleTx attaches EXACTLY ONE signer to a policy rule — the ephemeral
+        // ed25519 key — and rule-management can only remove signers, never add them. So
+        // `authenticated_signers` can never exceed 1 for a rule carrying a policy. A threshold
+        // above 1 either fails install (the OZ pattern validates threshold <= signers.len()) or
+        // installs and then rejects every real transaction, both AFTER the suite passed and the
+        // policy deployed. Threshold 1 is still meaningful: a policy-only rule can authenticate
+        // zero signers.
+        errors.push(
+          `${prefix}: threshold must be 1. A policy rule is deployed with exactly one delegated ` +
+          `signer (the ephemeral key) and signers can only be removed from it, so a threshold ` +
+          `above 1 can never be met on-chain — the policy would install and then reject every ` +
+          `transaction. Requiring more signers means changing how the rule is deployed, not the ` +
+          `policy.`
+        );
       }
       break;
     }
@@ -492,6 +531,20 @@ function validateGlobalRule(rule: GlobalRule, prefix: string): string[] {
       const { validAfterLedger, validUntilLedger } = rule.params;
       if (validAfterLedger == null && validUntilLedger == null) {
         errors.push(`${prefix}: at least one of validAfterLedger or validUntilLedger is required`);
+      }
+      // A ledger sequence is a u32 on-chain and is interpolated straight into the generated
+      // Rust. Unchecked, a float emitted `l.sequence_number = 4294967295.5`, and u32::MAX
+      // emitted `4294967296` for the past-the-window edge — `error: literal out of range`,
+      // which takes the whole crate down for a reason that names nothing in the schema.
+      for (const [name, value] of [
+        ["validAfterLedger", validAfterLedger], ["validUntilLedger", validUntilLedger],
+      ] as const) {
+        // u32::MAX is excluded deliberately: the rejection test needs `validUntilLedger + 1`.
+        if (value != null && (!isU32(value) || value >= 0xffff_ffff)) {
+          errors.push(
+            `${prefix}: ${name} must be a whole ledger sequence between 0 and ${0xffff_fffe}`
+          );
+        }
       }
       if (validAfterLedger != null && validUntilLedger != null && validAfterLedger >= validUntilLedger) {
         errors.push(`${prefix}: validAfterLedger must be less than validUntilLedger`);

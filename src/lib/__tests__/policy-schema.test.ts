@@ -211,9 +211,29 @@ describe("validateSchema", () => {
   describe("threshold rule (global)", () => {
     it("should accept valid threshold", () => {
       const result = validateSchema(
-        validSchema({ globalRules: [{ type: "threshold", params: { threshold: 3 } }] })
+        validSchema({ globalRules: [{ type: "threshold", params: { threshold: 1 } }] })
       );
       expect(result.valid).toBe(true);
+    });
+
+    // buildAddContextRuleTx attaches exactly ONE signer to a policy rule (the ephemeral ed25519
+    // key) and rule-management can only remove signers, never add them — so authenticated_signers
+    // can never exceed 1 and a higher threshold either fails install or rejects every real
+    // transaction, both after the suite passed and the policy deployed.
+    it("refuses a threshold above 1, which no deployed rule can ever meet", () => {
+      const result = validateSchema(
+        validSchema({ globalRules: [{ type: "threshold", params: { threshold: 2 } }] })
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toMatch(/exactly one delegated signer/);
+    });
+
+    it("refuses a non-integer threshold, which reaches the generated Rust as a u32 literal", () => {
+      // `1.5` passed the old `< 1` check and emitted `const REQUIRED_SIGNERS: u32 = 1.5;`.
+      const result = validateSchema(
+        validSchema({ globalRules: [{ type: "threshold", params: { threshold: 1.5 } }] })
+      );
+      expect(result.valid).toBe(false);
     });
 
     it("should reject threshold < 1", () => {
@@ -265,6 +285,46 @@ describe("validateSchema", () => {
 
     it("still accepts exactly one contract", () => {
       expect(validateSchema(validSchema()).valid).toBe(true);
+    });
+
+    // The generator emits a fixed set of test fn names per rule TYPE, so a duplicate type
+    // produces two Rust fns with one name and the crate fails to compile — an opaque build
+    // failure that names nothing in the schema.
+    it("rejects a second rule of the same type", () => {
+      const result = validateSchema(
+        validSchema({
+          globalRules: [
+            { type: "threshold", params: { threshold: 1 } },
+            { type: "threshold", params: { threshold: 1 } },
+          ],
+        })
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toMatch(/Only one rule of each type/);
+    });
+
+    it("accepts one rule of each different type together", () => {
+      expect(validateSchema(
+        validSchema({
+          globalRules: [
+            { type: "threshold", params: { threshold: 1 } },
+            { type: "time_lock", params: { validUntilLedger: 900_000 } },
+          ],
+        })
+      ).valid).toBe(true);
+    });
+
+    // A ledger sequence is interpolated straight into the generated Rust as a u32 literal, and
+    // the past-the-window test emits `validUntilLedger + 1`.
+    it("rejects a ledger bound that is not a whole in-range u32", () => {
+      for (const params of [
+        { validUntilLedger: 4294967295 },   // +1 overflows u32 in the rejection test
+        { validAfterLedger: 1.5 },
+        { validUntilLedger: -1 },
+      ]) {
+        const result = validateSchema(validSchema({ globalRules: [{ type: "time_lock", params }] }));
+        expect(result.valid, JSON.stringify(params)).toBe(false);
+      }
     });
   });
 
