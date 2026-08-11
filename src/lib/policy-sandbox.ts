@@ -107,12 +107,11 @@ export function generateTestCases(schema: PolicySchema): string {
   // One fixture derived from the global rules, shared by every positive call and every
   // positive control. Previously each of those hardcoded a single signer and never touched
   // the ledger, so a CORRECT threshold or time-locked policy failed its own positive tests.
+  // No weighted_threshold arm: validateSchema refuses that rule type before this runs, and the
+  // arm claimed a signer count for a rule the deployment path cannot express.
   const requiredSigners = Math.max(
     1,
-    ...schema.globalRules.map(r =>
-      r.type === "threshold" ? r.params.threshold
-        : r.type === "weighted_threshold" ? r.params.weights.length
-        : 1),
+    ...schema.globalRules.map(r => (r.type === "threshold" ? r.params.threshold : 1)),
   );
 
   const timeLock = schema.globalRules.find(r => r.type === "time_lock");
@@ -398,8 +397,14 @@ fn test_enforce_before_install_is_rejected() {
   // keyed by (smart_account, context_rule.id). `test_enforce_before_install_is_rejected` does not
   // prove that: a policy keyed by rule id alone, or globally, has no state there either and
   // panics for the right-looking reason. These two install for ONE (account, rule) and then
-  // enforce for a neighbour, which only a correctly-keyed policy rejects. Without them, one
-  // account's install silently configures every other account's calls.
+  // enforce for a neighbour. Without them, one account's install silently configures every other
+  // account's calls.
+  //
+  // Rejecting a neighbour is necessary and not sufficient, so the rule test also proves
+  // COEXISTENCE. A half-keyed policy can reject both neighbours by recording which rule it was
+  // installed on and comparing that id — right answer, wrong structure — and its two installs
+  // still collide. Isolation of absent state and coexistence of present state are different
+  // claims; the mutant that passes the first fails the second.
   tests.push(`
 #[test]
 fn test_enforce_rejects_other_smart_account() {
@@ -446,6 +451,17 @@ fn test_enforce_rejects_other_context_rule() {
         "enforce() succeeded for a context rule this policy was never installed on — state must \\
          be keyed by (smart_account, context_rule.id), not by the account alone"
     );
+
+    // Rejecting an ABSENT install is only half of it. A policy keyed by the account alone that
+    // records which rule it was installed on, and compares that id in enforce, rejects the
+    // neighbour above for a plausible-looking reason and passes everything else — while its two
+    // installs share one slot. Only installing BOTH and enforcing against BOTH separates
+    // isolation from coexistence. install() is permissionless beyond require_auth, so a second
+    // install on the same deployed policy is a real scenario, not a hypothetical.
+    client.install(&create_test_params(&env), &other_rule, &smart_account);
+    client.enforce(&context, &fixture_signers(&env), &other_rule, &smart_account);
+    let first_rule_ctx = create_function_context(&env, build_default_args(&env));
+    client.enforce(&first_rule_ctx, &fixture_signers(&env), &context_rule, &smart_account);
 }`);
 
   tests.push(`

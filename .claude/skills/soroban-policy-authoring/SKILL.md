@@ -177,6 +177,10 @@ Added 2026-08-11, same rule, found by a six-model adversarial review of the harn
   fabricate N synthetic signers, so they prove nothing about what deployment can produce.
   Threshold 1 stays meaningful: a policy-only rule can authenticate zero signers. Re-open this
   when a rule can carry more than one delegated key.
+  This refusal is **app-scoped, not a protocol fact**: the smart-account standard lets a rule
+  carry up to 15 signers, and other tooling can add them. It is refused here because *this*
+  deployment path cannot produce such a rule, so the check belongs with the deploy path — if
+  PollyWallet ever gains an add-signer flow, lift it in the same change.
 * **Two global rules of the same type.** The generator emits a fixed set of test fn names per
   rule type, so a duplicate produced two Rust fns with one name and the whole crate failed to
   compile — an opaque build failure naming nothing in the schema. Install params are a flat map
@@ -483,6 +487,12 @@ empty passes everything else:
   either and panics for a right-looking reason. Only installing for ONE (account, rule) and then
   enforcing for a neighbour separates them. Mutation-verified: keying by rule id alone fails
   exactly the first, keying by account alone fails exactly the second.
+  Rejecting a neighbour is necessary and **not sufficient**, so the rule test also installs BOTH
+  rules and enforces against each. A policy keyed by the account alone that records which rule it
+  was installed on, and compares that id in `enforce`, rejects both neighbours for a
+  plausible-looking reason — right answer, wrong structure — and its two installs still collide.
+  That mutant passes an isolation-only suite 16/16. `install()` is permissionless beyond
+  `require_auth`, so a second install against one deployed policy is a real scenario.
 
 Rules for anything you add:
 

@@ -619,7 +619,8 @@ describe("argument type honesty", () => {
 // and then enforcing for a neighbour tells them apart. Verified by mutation against a real
 // cargo build: keying by rule id alone fails exactly test_enforce_rejects_other_smart_account,
 // keying by account alone fails exactly test_enforce_rejects_other_context_rule, and a
-// correctly-keyed policy passes both.
+// correctly-keyed policy passes both. Rejection alone is not enough, though — see the
+// coexistence test below for the half-keyed mutant that rejects both neighbours correctly.
 describe("multi-tenancy is falsifiable", () => {
   const schema: PolicySchema = {
     $schema: SCHEMA_VERSION,
@@ -649,6 +650,23 @@ describe("multi-tenancy is falsifiable", () => {
     const byRule = rust.slice(rust.indexOf("fn test_enforce_rejects_other_context_rule"));
     expect(byRule).toContain("create_test_context_rule_with_id(&env, 2)");
     expect(byRule).toContain("&other_rule, &smart_account).is_err()");
+  });
+
+  // Rejecting an ABSENT install is necessary and not sufficient. A policy keyed by the account
+  // alone that records which rule it was installed on, and compares that id in enforce, rejects
+  // both neighbours for a plausible-looking reason — right answer, wrong structure — while its
+  // two installs share one slot. Mutation-verified: that mutant passes the isolation-only suite
+  // 16/16 and fails once the rule test installs BOTH rules and enforces against each.
+  it("proves two installs for one account coexist, not just that a missing one is rejected", () => {
+    const byRule = generateTestCases(schema).slice(
+      generateTestCases(schema).indexOf("fn test_enforce_rejects_other_context_rule"),
+    );
+    // The negative assert comes first, then a second install and a successful call on each rule.
+    expect(byRule.indexOf("is_err()")).toBeLessThan(
+      byRule.indexOf("client.install(&create_test_params(&env), &other_rule, &smart_account);"),
+    );
+    expect(byRule).toContain("client.enforce(&context, &fixture_signers(&env), &other_rule, &smart_account);");
+    expect(byRule).toContain("client.enforce(&first_rule_ctx, &fixture_signers(&env), &context_rule, &smart_account);");
   });
 
   it("keeps the fixture rule at id 1 so the neighbour id is genuinely different", () => {
