@@ -7,6 +7,7 @@ import {
   schemaFromJSON,
   emptySchema,
   constraintKindsForType,
+  installParamsSpec,
   isIntegerArgType,
   toDisplayUnits,
   SCHEMA_VERSION,
@@ -778,5 +779,93 @@ describe("exact numeric validation", () => {
   it("leaves address and symbol values alone", () => {
     expect(validateSchema(withExact("symbol", "transfer")).valid).toBe(true);
     expect(validateSchema(withExact("address", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC")).valid).toBe(true);
+  });
+});
+
+// Every constraint the schema declares must put SOMETHING in install_params. The system prompt
+// says a void install_params is acceptable ONLY when the schema declares no constraints and no
+// global rules, and must panic otherwise — so an exact-only or blocklist-only schema that
+// produced an empty param list left the model a coin flip between obeying the prompt (panic,
+// failing test_install_succeeds) and accepting it (passing, contradicting the prompt).
+describe("a declared constraint always reaches install_params", () => {
+  const withConstraint = (type: string, constraint: any): PolicySchema => ({
+    $schema: SCHEMA_VERSION,
+    name: "void-params",
+    description: "install param fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{ name: "transfer", args: [{ name: "value", type, constraint }] }],
+    }],
+  });
+
+  const ADDRESS = "GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57";
+
+  it("emits a param for every constraint kind, so Val::VOID means 'nothing declared'", () => {
+    const cases: Array<[string, any, string]> = [
+      ["i128", { kind: "exact", value: "100" }, "exact_value"],
+      ["address", { kind: "exact", value: ADDRESS }, "exact_value"],
+      ["address", { kind: "blocklist", values: [ADDRESS] }, "blocked_value"],
+      ["address", { kind: "allowlist", values: [ADDRESS] }, "allowed_value"],
+      ["i128", { kind: "range", max: "100" }, "max_value"],
+    ];
+    for (const [type, constraint, expectedKey] of cases) {
+      const schema = withConstraint(type, constraint);
+      expect(validateSchema(schema).valid, `${type}/${constraint.kind}`).toBe(true);
+      const keys = installParamsSpec(schema).map(p => p.key);
+      expect(keys, `${type}/${constraint.kind}`).toContain(expectedKey);
+    }
+  });
+
+  it("still emits nothing when the schema declares nothing", () => {
+    expect(installParamsSpec(withConstraint("address", { kind: "unconstrained" }))).toEqual([]);
+  });
+});
+
+describe("values that would panic inside the generated Rust are refused at the schema", () => {
+  const withSymbol = (value: string): PolicySchema => ({
+    $schema: SCHEMA_VERSION,
+    name: "symbol-values",
+    description: "symbol fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{
+        name: "transfer",
+        args: [{ name: "tag", type: "symbol", constraint: { kind: "exact", value } }],
+      }],
+    }],
+  });
+
+  // Symbol::new panics at RUNTIME on anything outside [a-zA-Z0-9_]{1,32}, inside the generated
+  // fixtures — so every enforce test died in setup and the run blamed a possibly-correct policy.
+  it("refuses a symbol value Symbol::new would panic on", () => {
+    for (const bad of ["my-tag needs space", "has-hyphen", "", "x".repeat(33)]) {
+      expect(validateSchema(withSymbol(bad)).valid, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("accepts a legal symbol", () => {
+    expect(validateSchema(withSymbol("transfer_tag_1")).valid).toBe(true);
+  });
+
+  // "after ledger 0" is every ledger, so no rejection counterexample exists: the after-window
+  // test needs an upper bound and the before-window test needs after > 0. The schema emitted a
+  // positive-only test any policy ignoring the rule passes, while the UI showed a time lock.
+  it("refuses a time lock whose only bound is validAfterLedger 0", () => {
+    const schema: PolicySchema = {
+      $schema: SCHEMA_VERSION,
+      name: "no-window",
+      description: "degenerate window",
+      globalRules: [{ type: "time_lock", params: { validAfterLedger: 0 } }],
+      contracts: [{
+        address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        functions: [{ name: "transfer", args: [] }],
+      }],
+    };
+    expect(validateSchema(schema).valid).toBe(false);
+    expect(validateSchema({
+      ...schema, globalRules: [{ type: "time_lock", params: { validAfterLedger: 0, validUntilLedger: 900_000 } }],
+    }).valid).toBe(true);
   });
 });

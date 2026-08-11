@@ -185,6 +185,16 @@ Added 2026-08-11, same rule, found by a six-model adversarial review of the harn
   rule type, so a duplicate produced two Rust fns with one name and the whole crate failed to
   compile — an opaque build failure naming nothing in the schema. Install params are a flat map
   besides, so the second rule silently overwrote the first.
+* **A `time_lock` whose only bound is `validAfterLedger: 0`.** Every ledger is after 0, so no
+  rejection counterexample exists — the after-window test needs an upper bound and the
+  before-window test needs `after > 0`. The schema emitted a positive-only test that any policy
+  ignoring the rule passes, while `installParamsSpec` still sent `valid_after_ledger` and the UI
+  still showed a configured time lock. Decorative in exactly the `weighted_threshold` sense.
+* **Symbol constraint values outside `[a-zA-Z0-9_]{1,32}`.** `Symbol::new` panics at RUNTIME,
+  inside the generated fixtures, so an unchecked value killed every enforce test in setup with
+  `Error(Value, InvalidInput)` — a run reporting ~10 failures against a policy that may be
+  perfectly correct, naming nothing in the schema. Same failure shape and same fix as the
+  address checksum check.
 * **Global-rule numbers that are not whole in-range u32s.** `threshold: 1.5` passed the old
   `< 1` check and reached the generated Rust as `const REQUIRED_SIGNERS: u32 = 1.5;`;
   `validUntilLedger: u32::MAX` made the past-the-window test emit `4294967296`
@@ -341,6 +351,16 @@ The wire contract: the smart account passes `install_params` through untouched
 Symbol-keyed `ScVal::Map` — which in Soroban is *also* the canonical serialization of a
 `#[contracttype]` struct, so a typed struct with matching field names produces identical
 bytes. The kit's own encoder pins this shape in a test.
+
+**Every declared constraint puts something in `install_params`**, including `exact` and
+`blocklist`, whose permitted values are baked into the generated source rather than passed in.
+They emit `exact_{arg}` / `blocked_{arg}` boolean flags for one reason: the prompt says a void
+`install_params` is acceptable ONLY when the schema declares no constraints and no global rules,
+and must panic otherwise. While those two kinds emitted nothing, an exact-only or blocklist-only
+schema declared constraints and produced an EMPTY param list, so both the generated tests and
+the real deploy sent `Val::VOID` — leaving the model a coin flip between obeying the prompt
+(panic, failing `test_install_succeeds`) and accepting it (passing, contradicting the prompt).
+`Val::VOID` now means "nothing was declared", which is what the prompt already assumed.
 
 So the encoding is correct. The **defaulting** is the bug. Any instruction of the form
 "use `.unwrap_or()` so install succeeds even if a key is missing", or "when params is void
@@ -518,7 +538,13 @@ Rules for anything you add:
   floor, where no counterexample is representable.
 - Generate one test per value in a list, not one per list. A blocklist that only exercised
   `values[0]` was passed by a mutant rejecting the first address and accepting the second —
-  which is the shape a model most often writes when handed a list.
+  which is the shape a model most often writes when handed a list. **This applies to the
+  ACCEPTANCE side too**, and it was fixed on the blocklist branch a year before the allowlist
+  branch: a single acceptance test for `values[0]` is passed by a policy that honours the first
+  entry and rejects every other listed one, because both branches of the suite agree with it —
+  the acceptance sends `values[0]`, the rejection sends a non-member. The user is told three
+  addresses are allowed, gets one, and sees a "verified" deploy. Mutation-verified in both
+  directions.
 - Scope test names with the `c{i}_f{j}` index — two functions sharing an argument name
   otherwise emit duplicate Rust fns and the crate fails to compile.
 - A run that parsed **zero** tests is a failure, not a pass (`[].every()` is `true`).

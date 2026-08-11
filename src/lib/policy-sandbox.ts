@@ -138,10 +138,11 @@ use soroban_sdk::auth::{Context, ContractContext};
 #[allow(unused_imports)]
 use soroban_sdk::{IntoVal, TryFromVal, FromVal};
 
-/// Signers required for a call to satisfy every global rule in the schema. Positive tests and
-/// the positive controls in negative tests must use this, not a hardcoded 1 — a correct
-/// threshold-N policy rejects a 1-signer call, which would fail the control and make every
-/// negative test unreachable.
+/// Signers a call needs to satisfy every global rule in the schema. Positive tests and the
+/// positive controls in negative tests must use this rather than a hardcoded count, so a
+/// correct policy never fails its own control and leaves every negative test unreachable.
+/// validateSchema pins threshold to 1 today, so in practice this is 1 — it stays derived
+/// because the rule that makes it 1 lives in the deploy path, not here.
 const REQUIRED_SIGNERS: u32 = ${requiredSigners};
 
 fn create_test_context_rule(env: &soroban_sdk::Env) -> ContextRule {
@@ -558,12 +559,20 @@ fn test_double_install_is_rejected() {
           case "allowlist":
             if (arg.constraint.values.length > 0) {
               const allowedValue = arg.constraint.values[0];
-              // Positive: a listed value passes.
-              tests.push(acceptanceTest({
-                name: `test_enforce_${suffix}_${ident(arg.name)}_allowed`,
-                argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, allowedValue) }, useConstraintValues: true }),
-                ctxFn, argsFn,
-              }));
+              // One acceptance test per listed value, not one per list — the exact mirror of the
+              // blocklist rule below, and the same mutant shape: a policy that honours only
+              // values[0] and rejects every other listed value passed a single-value suite,
+              // because both branches agreed with it (the acceptance sent values[0], the
+              // rejection sent a non-member). The user is told 3 addresses are allowed and gets
+              // 1, with a "verified" deploy. Suffixed by index, not by value: ident() maps
+              // "a-b" and "a_b" to one token and two Rust fns with one name is a compile error.
+              for (const [vi, listedValue] of arg.constraint.values.entries()) {
+                tests.push(acceptanceTest({
+                  name: `test_enforce_${suffix}_${ident(arg.name)}_allowed_${vi}`,
+                  argLines: generateArgBuilderLines(func.args, "    ", "default", { override_: { overrideIndex: argIndex(arg), overrideValue: generateLiteralForType(arg.type, listedValue) }, useConstraintValues: true }),
+                  ctxFn, argsFn,
+                }));
+              }
               // Negative: an UNLISTED value must be rejected. Without this a no-op enforce()
               // passed every allowlist-only schema.
               const notAllowed = generateWrongValueForType(

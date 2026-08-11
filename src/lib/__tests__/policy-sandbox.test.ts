@@ -799,3 +799,43 @@ describe("positive controls cannot poison the call under test", () => {
     expect(assertions).toBeGreaterThanOrEqual(controls);
   });
 });
+
+// The mirror of the blocklist rule: one acceptance test per LISTED value, not one per list.
+// A policy that honours values[0] and rejects every other listed value passed a single-value
+// suite — both branches agreed with it — so the user was told three addresses were allowed,
+// got one, and saw a "verified" deploy.
+describe("every allowlisted value gets its own acceptance test", () => {
+  const A = "GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57";
+  const B = "GABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQHGPC";
+  const C = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+  const schema: PolicySchema = {
+    $schema: SCHEMA_VERSION,
+    name: "allowlist-each",
+    description: "allowlist fixture",
+    globalRules: [],
+    contracts: [{
+      address: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      functions: [{
+        name: "transfer",
+        args: [{ name: "to", type: "address", constraint: { kind: "allowlist", values: [A, B, C] } }],
+      }],
+    }],
+  };
+
+  it("emits one test per value, not just values[0]", () => {
+    const rust = generateTestCases(schema);
+    expect(rust).toContain("fn test_enforce_c0_f0_to_allowed_0");
+    expect(rust).toContain("fn test_enforce_c0_f0_to_allowed_1");
+    expect(rust).toContain("fn test_enforce_c0_f0_to_allowed_2");
+    for (const value of [A, B, C]) expect(rust).toContain(value);
+    // One rejection is still enough — the gap was entirely on the acceptance side.
+    expect(rust).toContain("fn test_enforce_c0_f0_to_not_allowlisted");
+  });
+
+  it("keeps the counterexample outside the WHOLE list, not just the first entry", () => {
+    const rejection = generateTestCases(schema).slice(
+      generateTestCases(schema).indexOf("fn test_enforce_c0_f0_to_not_allowlisted"),
+    );
+    for (const value of [A, B, C]) expect(rejection).toContain(value); // the while-loop guard
+  });
+});

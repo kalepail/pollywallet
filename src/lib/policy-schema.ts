@@ -306,14 +306,32 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
                 // malformed one panics at runtime with an opaque
                 // Error(Value, InvalidInput) "unexpected strkey length" during install —
                 // long after the schema was accepted.
+                const constraintValues = arg.constraint.kind === "exact" ? [arg.constraint.value]
+                  : arg.constraint.kind === "allowlist" || arg.constraint.kind === "blocklist"
+                    ? arg.constraint.values : [];
+
                 if (arg.type.toLowerCase() === "address") {
-                  const values = arg.constraint.kind === "exact" ? [arg.constraint.value]
-                    : arg.constraint.kind === "allowlist" || arg.constraint.kind === "blocklist"
-                      ? arg.constraint.values : [];
-                  for (const v of values) {
+                  for (const v of constraintValues) {
                     if (typeof v === "string" && v && !isValidAddress(v)) {
                       errors.push(
                         `${aPrefix}: "${v}" is not a valid Stellar address (G... or C... StrKey)`
+                      );
+                    }
+                  }
+                }
+
+                // Symbols need the same check for the same reason as addresses. A Soroban Symbol
+                // is [a-zA-Z0-9_] up to 32 chars and `Symbol::new` PANICS on anything else — at
+                // runtime, inside the generated test fixtures. An unvalidated value reached
+                // build_default_args and killed every enforce test in setup with
+                // `Error(Value, InvalidInput)`, reporting ~10 failures against a policy that may
+                // be perfectly correct and naming nothing in the schema.
+                if (arg.type.toLowerCase() === "symbol") {
+                  for (const v of constraintValues) {
+                    if (typeof v === "string" && !/^[a-zA-Z0-9_]{1,32}$/.test(v)) {
+                      errors.push(
+                        `${aPrefix}: "${v}" is not a valid Soroban Symbol — letters, digits and ` +
+                        `underscores only, 1 to 32 characters`
                       );
                     }
                   }
@@ -531,6 +549,17 @@ function validateGlobalRule(rule: GlobalRule, prefix: string): string[] {
       const { validAfterLedger, validUntilLedger } = rule.params;
       if (validAfterLedger == null && validUntilLedger == null) {
         errors.push(`${prefix}: at least one of validAfterLedger or validUntilLedger is required`);
+      } else if (validUntilLedger == null && validAfterLedger === 0) {
+        // A window of "after ledger 0" is every ledger, so the generator can build no rejection
+        // counterexample for it: the after-window test needs an upper bound and the before-window
+        // test needs `after > 0`. The schema emitted a positive-only test that any policy
+        // ignoring the rule passes, while installParamsSpec still sent valid_after_ledger and the
+        // UI still showed a configured time lock. Decorative, in the weighted_threshold sense.
+        errors.push(
+          `${prefix}: validAfterLedger 0 is not a window — every ledger is after 0, so nothing ` +
+          `can be tested against it and the rule would be decorative. Set validUntilLedger, or ` +
+          `a validAfterLedger above 0.`
+        );
       }
       // A ledger sequence is a u32 on-chain and is interpolated straight into the generated
       // Rust. Unchecked, a float emitted `l.sequence_number = 4294967295.5`, and u32::MAX
@@ -750,13 +779,36 @@ export function installParamsSpec(schema: PolicySchema): InstallParam[] {
           }
         }
 
+        // Feature flags only. The permitted VALUES are baked into the generated contract from
+        // the schema; install params carry no list. The flag exists so every declared constraint
+        // puts SOMETHING in install_params.
+        //
+        // That invariant is load-bearing, and exact/blocklist used to break it. The system
+        // prompt says a void install_params is acceptable ONLY when the schema declares no
+        // constraints and no global rules, and must panic otherwise. An exact-only or
+        // blocklist-only schema declared constraints and produced an EMPTY param list, so both
+        // the generated tests and the real deploy sent Val::VOID — leaving the model a coin
+        // flip between obeying the prompt (panic, failing test_install_succeeds) and accepting
+        // it (passing, contradicting the prompt). Same value, same key space, no drift: the
+        // prompt's key list, the tests, and the deploy path all read this function.
         if (c.kind === "allowlist" && c.values.length > 0) {
-          // A feature flag only. The permitted VALUES are baked into the generated contract
-          // from the schema; install params carry no list. Keep the flag so the contract can
-          // verify it was configured deliberately.
           params.push({
             key: `allowed_${arg.name}`, type: "bool", value: "true",
             description: `flag that the allowlist for ${arg.name} is enabled`,
+          });
+        }
+
+        if (c.kind === "blocklist" && c.values.length > 0) {
+          params.push({
+            key: `blocked_${arg.name}`, type: "bool", value: "true",
+            description: `flag that the blocklist for ${arg.name} is enabled`,
+          });
+        }
+
+        if (c.kind === "exact") {
+          params.push({
+            key: `exact_${arg.name}`, type: "bool", value: "true",
+            description: `flag that the exact-value rule for ${arg.name} is enabled`,
           });
         }
       }
