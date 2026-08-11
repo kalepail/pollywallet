@@ -9,7 +9,16 @@ if (typeof globalThis !== "undefined" && !(globalThis as any).Buffer) {
   (globalThis as any).Buffer = Buffer;
 }
 import base64url from "base64url";
-import { hash, xdr, Address, Keypair, StrKey } from "@stellar/stellar-sdk";
+import {
+  Address,
+  Keypair,
+  StrKey,
+  authorizeEntry,
+  buildAuthorizationEntryPreimage,
+  hash,
+  nativeToScVal,
+  xdr,
+} from "@stellar/stellar-sdk";
 
 // --- Constants ---
 const SECP256R1_PUBLIC_KEY_SIZE = 65;
@@ -195,14 +204,7 @@ export function buildSignaturePayload(
   entry: xdr.SorobanAuthorizationEntry,
   expiration: number
 ): Buffer {
-  const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-    new xdr.HashIdPreimageSorobanAuthorization({
-      networkId: hash(Buffer.from(networkPassphrase)),
-      nonce: entry.credentials().address().nonce(),
-      signatureExpirationLedger: expiration,
-      invocation: entry.rootInvocation(),
-    })
-  );
+  const preimage = buildAuthorizationEntryPreimage(entry, expiration, networkPassphrase);
   return hash(preimage.toXDR()) as Buffer;
 }
 
@@ -266,71 +268,20 @@ export function writeAuthPayload(
 }
 
 /** Sign auth entries with a regular Stellar keypair for relayer submission. */
-export function signKeypairAuthEntries(
+export async function signKeypairAuthEntries(
   authEntries: xdr.SorobanAuthorizationEntry[],
   keypair: Keypair,
   expiration: number,
   networkPassphrase: string
-): xdr.SorobanAuthorizationEntry[] {
-  const networkId = hash(Buffer.from(networkPassphrase));
-
-  function makeSignature(nonce: xdr.Int64, invocation: xdr.SorobanAuthorizedInvocation) {
-    const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-      new xdr.HashIdPreimageSorobanAuthorization({
-        networkId,
-        nonce,
-        signatureExpirationLedger: expiration,
-        invocation,
-      })
-    );
-    return keypair.sign(hash(preimage.toXDR()));
-  }
-
-  function addressSignatureScVal(signature: Buffer) {
-    return xdr.ScVal.scvVec([
-      xdr.ScVal.scvMap([
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("public_key"),
-          val: xdr.ScVal.scvBytes(keypair.rawPublicKey()),
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("signature"),
-          val: xdr.ScVal.scvBytes(signature),
-        }),
-      ]),
-    ]);
-  }
-
-  return authEntries.map((entry) => {
-    const credType = entry.credentials().switch().name;
-
-    if (credType === "sorobanCredentialsSourceAccount") {
-      const nonce = xdr.Int64.fromString(Date.now().toString());
-      const sig = makeSignature(nonce, entry.rootInvocation());
-
-      return new xdr.SorobanAuthorizationEntry({
-        credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-          new xdr.SorobanAddressCredentials({
-            address: Address.fromString(keypair.publicKey()).toScAddress(),
-            nonce,
-            signatureExpirationLedger: expiration,
-            signature: addressSignatureScVal(sig),
-          })
-        ),
-        rootInvocation: entry.rootInvocation(),
-      });
+): Promise<xdr.SorobanAuthorizationEntry[]> {
+  for (const entry of authEntries) {
+    if (entry.credentials().switch().name === "sorobanCredentialsSourceAccount") {
+      throw new Error("Source-account authorization cannot be relayed; simulate with a different transaction source");
     }
-
-    if (credType === "sorobanCredentialsAddress") {
-      const credentials = entry.credentials().address();
-      credentials.signatureExpirationLedger(expiration);
-      const sig = makeSignature(credentials.nonce(), entry.rootInvocation());
-      credentials.signature(addressSignatureScVal(sig));
-      return entry;
-    }
-
-    return entry;
-  });
+  }
+  return Promise.all(authEntries.map((entry) =>
+    authorizeEntry(entry, keypair, expiration, networkPassphrase)
+  ));
 }
 
 // --- High-level Signing ---
@@ -369,14 +320,27 @@ export async function signWalletAuthEntries(params: {
     const credType = entry.credentials().switch().name;
     if (credType === "sorobanCredentialsAddress") {
       const credentials = entry.credentials().address();
-      credentials.signatureExpirationLedger(expiration);
       if (Address.fromScAddress(credentials.address()).toString() === wallet.contractId) {
-        const sigPayload = buildSignaturePayload(networkPassphrase, entry, expiration);
-        const authDigest = buildAuthDigest(sigPayload, contextRuleIds);
-        const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
-        credentials.signature(
-          writeAuthPayload(contextRuleIds, signer, buildWebAuthnSigBytes(webAuthnResult))
-        );
+        signed.push(await authorizeEntry(
+          entry,
+          async (_preimage, payload) => {
+            const webAuthnResult = await signWithPasskey(
+              wallet.credentialId,
+              buildAuthDigest(payload, contextRuleIds),
+            );
+            return {
+              signatureScVal: writeAuthPayload(
+                contextRuleIds,
+                signer,
+                buildWebAuthnSigBytes(webAuthnResult),
+              ),
+            };
+          },
+          expiration,
+          networkPassphrase,
+          wallet.contractId,
+        ));
+        continue;
       }
     }
     signed.push(entry);
@@ -412,12 +376,7 @@ export function deriveContractAddress(
 }
 
 export function toI128(stroops: bigint): xdr.ScVal {
-  return xdr.ScVal.scvI128(
-    new xdr.Int128Parts({
-      lo: xdr.Uint64.fromString((stroops & 0xFFFFFFFFFFFFFFFFn).toString()),
-      hi: xdr.Int64.fromString((stroops >> 64n).toString()),
-    })
-  );
+  return nativeToScVal(stroops, { type: "i128" });
 }
 
 // --- Amount Parsing ---

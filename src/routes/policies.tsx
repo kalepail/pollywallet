@@ -667,12 +667,23 @@ function PolicyBuilder() {
         .build();
 
       let simResult;
-      try {
-        simResult = await server.simulateTransaction(simTx);
-      } catch (e: any) {
-        throw new Error(`Simulation request failed: ${e.message}`);
+      for (let attempt = 0; attempt < 120; attempt++) {
+        try {
+          simResult = await server.simulateTransaction(simTx);
+        } catch (e: any) {
+          throw new Error(`Simulation request failed: ${e.message}`);
+        }
+        if (!("error" in simResult)) break;
+        const simulationError = String((simResult as any).error);
+        if (!simulationError.includes("trying to get non-existing value for contract instance")) {
+          throw new Error(`Simulation failed: ${simulationError}`);
+        }
+        setInstallStatus("Waiting for deployed policy to reach Stellar RPC...");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-      if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
+      if (!simResult || "error" in simResult) {
+        throw new Error(`Simulation failed: ${String((simResult as any)?.error)}`);
+      }
       const simSuccess =
         simResult as import("@stellar/stellar-sdk/rpc").Api.SimulateTransactionSuccessResponse;
 
@@ -689,27 +700,33 @@ function PolicyBuilder() {
       });
 
       setInstallStatus("Submitting via relayer...");
-      const relayerResult = await requestSubmitToRelayer({
+      const relayerInput = {
         func: hostFunc.toXDR("base64"),
         auth: signedAuthEntries.map((e) => e.toXDR("base64")),
-      });
+      };
+      let relayerResult = await requestSubmitToRelayer(relayerInput);
+      for (let attempt = 1; attempt < 30 && !relayerResult.success; attempt++) {
+        if (!relayerResult.error?.includes("Simulation failed")) break;
+        setInstallStatus("Waiting for the policy to reach the relayer...");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        relayerResult = await requestSubmitToRelayer(relayerInput);
+      }
       if (!relayerResult.success) throw new Error(relayerResult.error || "Relayer failed");
+      if (!relayerResult.hash) throw new Error("Relayer returned no transaction hash");
 
-      if (relayerResult.hash) {
-        setInstallStatus("Waiting for confirmation...");
-        await server.pollTransaction(relayerResult.hash, { attempts: 15 });
+      setInstallStatus("Waiting for confirmation...");
+      const confirmedTransaction = await server.pollTransaction(relayerResult.hash, { attempts: 60 });
+      if (confirmedTransaction.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+        throw new Error(`Install transaction ${confirmedTransaction.status.toLowerCase()}`);
       }
 
       // Extract context rule ID from the return value
       // add_context_rule returns a ContextRule struct which includes the id
       let contextRuleId = 0;
-      if (relayerResult.hash) {
+      if (confirmedTransaction.returnValue) {
         try {
-          const txResult = await server.getTransaction(relayerResult.hash);
-          if (txResult.status === "SUCCESS" && txResult.returnValue) {
-            const native = scValToNative(txResult.returnValue);
-            contextRuleId = typeof native === "object" && native.id != null ? Number(native.id) : 0;
-          }
+          const native = scValToNative(confirmedTransaction.returnValue);
+          contextRuleId = typeof native === "object" && native.id != null ? Number(native.id) : 0;
         } catch { /* best effort */ }
       }
 

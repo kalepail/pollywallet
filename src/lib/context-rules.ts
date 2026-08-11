@@ -20,14 +20,17 @@ export interface ContextRuleInfo {
 // No server function needed — avoids Workers SDK import issues.
 
 import {
-  Contract,
-  TransactionBuilder,
-  Keypair,
-  Account,
+  contract,
   scValToNative,
-  nativeToScVal,
 } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
+
+interface WalletReadClient {
+  get_context_rules_count: () => Promise<contract.AssembledTransaction<number | bigint>>;
+  get_context_rule: (args: {
+    context_rule_id: number;
+  }) => Promise<contract.AssembledTransaction<any>>;
+}
 
 export async function requestContextRules(walletContractId: string): Promise<{
   success: boolean;
@@ -36,25 +39,14 @@ export async function requestContextRules(walletContractId: string): Promise<{
 }> {
   try {
     const server = new rpc.Server(TESTNET_RPC_URL);
-    const contract = new Contract(walletContractId);
+    const client = await contract.Client.from<WalletReadClient>({
+      contractId: walletContractId,
+      rpcUrl: TESTNET_RPC_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      server,
+    });
 
-    async function simulateCall(funcName: string, args: any[] = []) {
-      const account = new Account(Keypair.random().publicKey(), "0");
-      const tx = new TransactionBuilder(account, {
-        fee: "100",
-        networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call(funcName, ...args))
-        .setTimeout(30)
-        .build();
-
-      const sim = await server.simulateTransaction(tx);
-      if ("error" in sim) throw new Error(`Simulation failed: ${(sim as any).error}`);
-      const success = sim as any;
-      return success.result?.retval ? scValToNative(success.result.retval) : null;
-    }
-
-    const count = await simulateCall("get_context_rules_count");
+    const count = (await client.get_context_rules_count()).result;
     const ruleCount = Number(count);
 
     if (
@@ -94,7 +86,7 @@ export async function requestContextRules(walletContractId: string): Promise<{
     // so scan the contract's actual NextId range rather than guessing from count.
     for (let id = 0; rules.length < ruleCount && id < nextId; id++) {
       try {
-        const rule = await simulateCall("get_context_rule", [nativeToScVal(id, { type: "u32" })]);
+        const rule = (await client.get_context_rule({ context_rule_id: id })).result;
         if (!rule) continue;
 
         let contextType: ContextRuleInfo["contextType"] = "Default";

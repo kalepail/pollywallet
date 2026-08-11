@@ -1,4 +1,4 @@
-import { xdr, Address, scValToNative } from "@stellar/stellar-sdk";
+import { Address, Horizon, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
 import { TESTNET_RPC_URL, TESTNET_HORIZON_URL } from "./constants";
 
@@ -7,15 +7,22 @@ import { TESTNET_RPC_URL, TESTNET_HORIZON_URL } from "./constants";
 export interface InvocationNode {
   contractAddress: string;
   functionName: string;
-  args: { type: string; value: string }[];
+  args: TxArg[];
   /** Nested calls that require authorization from this address */
   subInvocations: InvocationNode[];
+}
+
+export interface TxArg {
+  type: string;
+  value: string;
+  /** Raw ScVal XDR, used by the policy harness when the ABI type is user-defined. */
+  xdr?: string;
 }
 
 export interface TxPattern {
   contractAddress: string;
   functionName: string;
-  args: { type: string; value: string }[];
+  args: TxArg[];
   signers: { type: "Delegated" | "External"; identity: string }[];
   /** The full authorization invocation tree from the auth entry */
   invocationTree?: InvocationNode;
@@ -23,7 +30,7 @@ export interface TxPattern {
   innerCall?: {
     targetContract: string;
     functionName: string;
-    args: { type: string; value: string }[];
+    args: TxArg[];
   };
 }
 
@@ -37,6 +44,7 @@ export interface TxAnalysis {
 // --- Public API ---
 
 const server = new rpc.Server(TESTNET_RPC_URL);
+const horizon = new Horizon.Server(TESTNET_HORIZON_URL);
 
 /**
  * Fetch a transaction by hash from Stellar testnet RPC and extract policy-relevant patterns.
@@ -65,17 +73,12 @@ export async function analyzeTransaction(hash: string): Promise<TxAnalysis> {
 }
 
 async function analyzeViaHorizon(hash: string): Promise<TxAnalysis> {
-  const res = await fetch(`${TESTNET_HORIZON_URL}/transactions/${hash}`);
-  if (!res.ok) {
+  let tx;
+  try {
+    tx = await horizon.transactions().transaction(hash).call();
+  } catch {
     throw new Error(`Transaction not found: ${hash}`);
   }
-
-  const tx = (await res.json()) as {
-    successful: boolean;
-    ledger: number;
-    created_at: string;
-    envelope_xdr: string;
-  };
 
   if (!tx.successful) {
     throw new Error(`Transaction failed: ${hash}`);
@@ -123,7 +126,7 @@ export function extractPatterns(envelope: xdr.TransactionEnvelope): TxPattern[] 
     const invokeArgs = hostFn.invokeContract();
     const contractAddress = Address.fromScAddress(invokeArgs.contractAddress()).toString();
     const functionName = invokeArgs.functionName().toString();
-    const args = invokeArgs.args().map(scValToArg);
+    const args = invokeArgs.args().map(scValToPatternArg);
 
     // Extract signers from auth entries
     const authEntries = invokeOp.auth();
@@ -153,11 +156,11 @@ export function extractPatterns(envelope: xdr.TransactionEnvelope): TxPattern[] 
           ? rawArgs[1].sym().toString()
           : rawArgs[1].str().toString();
 
-        let innerArgs: { type: string; value: string }[] = [];
+        let innerArgs: TxArg[] = [];
         if (rawArgs[2].switch().name === "scvVec") {
           const vec = rawArgs[2].vec();
           if (vec) {
-            innerArgs = vec.map(scValToArg);
+            innerArgs = vec.map(scValToPatternArg);
           }
         }
 
@@ -188,6 +191,10 @@ function u256Parts(parts: xdr.UInt256Parts): bigint {
     | (BigInt(parts.hiLo().toString()) << 128n)
     | (BigInt(parts.loHi().toString()) << 64n)
     | BigInt(parts.loLo().toString());
+}
+
+function scValToPatternArg(val: xdr.ScVal): TxArg {
+  return { ...scValToArg(val), xdr: val.toXDR("base64") };
 }
 
 /** Exported for tests: building a whole envelope per scalar to reach it proves nothing extra. */
@@ -275,13 +282,13 @@ function extractInvocationTree(
   const authorizedFn = invocation.function();
   let contractAddress = "";
   let functionName = "";
-  let args: { type: string; value: string }[] = [];
+  let args: TxArg[] = [];
 
   if (authorizedFn.switch().name === "sorobanAuthorizedFunctionTypeContractFn") {
     const contractFn = authorizedFn.contractFn();
     contractAddress = Address.fromScAddress(contractFn.contractAddress()).toString();
     functionName = contractFn.functionName().toString();
-    args = contractFn.args().map(scValToArg);
+    args = contractFn.args().map(scValToPatternArg);
   }
   // sorobanAuthorizedFunctionTypeCreateContractHostFn — leave fields as defaults
 

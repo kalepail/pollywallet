@@ -129,6 +129,8 @@ describe("extractPatterns", () => {
       "i128",
     ]);
     expect(p.innerCall!.args[2].value).toBe("10000000");
+    expect(xdr.ScVal.fromXDR(p.innerCall!.args[2].xdr!, "base64").switch().name)
+      .toBe("scvI128");
   });
 
   it("marks smart-account auth payloads as External signers", () => {

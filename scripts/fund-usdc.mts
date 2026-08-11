@@ -14,23 +14,19 @@
  */
 import {
   Keypair, Networks, TransactionBuilder, Operation, Asset, BASE_FEE,
-  Contract, Address, xdr, rpc, scValToNative,
+  Contract, Address, Horizon, nativeToScVal, xdr, rpc, scValToNative,
 } from "@stellar/stellar-sdk";
-import { TESTNET_USDC_TOKEN_CONTRACT, TESTNET_USDC_ISSUER } from "../src/lib/passkey.ts";
+import {
+  TESTNET_USDC_TOKEN_CONTRACT,
+  TESTNET_USDC_ISSUER,
+  parseXlmToStroops,
+} from "../src/lib/passkey.ts";
 import { TESTNET_RPC_URL, TESTNET_HORIZON_URL } from "../src/lib/constants.ts";
 
 const FRIENDBOT = "https://friendbot.stellar.org";
 const SLIPPAGE = 0.98;
 const server = new rpc.Server(TESTNET_RPC_URL);
-
-function toI128(value: bigint): xdr.ScVal {
-  return xdr.ScVal.scvI128(
-    new xdr.Int128Parts({
-      lo: xdr.Uint64.fromString((value & 0xffffffffffffffffn).toString()),
-      hi: xdr.Int64.fromString((value >> 64n).toString()),
-    })
-  );
-}
+const horizon = new Horizon.Server(TESTNET_HORIZON_URL);
 
 async function fundUsdc(walletContractId: string, xlmToSwap: string) {
   const kp = Keypair.random();
@@ -39,12 +35,8 @@ async function fundUsdc(walletContractId: string, xlmToSwap: string) {
   if (!funded.ok) throw new Error(`Friendbot failed: ${funded.status}`);
 
   const usdc = new Asset("USDC", TESTNET_USDC_ISSUER);
-  const quoteRes = await fetch(
-    `${TESTNET_HORIZON_URL}/paths/strict-send?source_asset_type=native` +
-    `&source_amount=${xlmToSwap}&destination_assets=USDC%3A${TESTNET_USDC_ISSUER}`
-  );
-  const quote = (await quoteRes.json()) as any;
-  const best = quote?._embedded?.records?.[0];
+  const quote = await horizon.strictSendPaths(Asset.native(), xlmToSwap, [usdc]).call();
+  const best = quote.records[0];
   if (!best) throw new Error("No XLM → USDC path on testnet right now");
   const destMin = (Number(best.destination_amount) * SLIPPAGE).toFixed(7);
   console.log(`Quote: ${xlmToSwap} XLM → ${best.destination_amount} USDC (floor ${destMin})`);
@@ -72,11 +64,13 @@ async function fundUsdc(walletContractId: string, xlmToSwap: string) {
   if (swapFinal.status !== "SUCCESS") throw new Error(`Swap failed: ${swapFinal.status}`);
   console.log(`Swap ok: ${swapSent.hash}`);
 
-  const accountJson = (await (await fetch(`${TESTNET_HORIZON_URL}/accounts/${kp.publicKey()}`)).json()) as any;
-  const held = accountJson.balances?.find(
-    (b: any) => b.asset_code === "USDC" && b.asset_issuer === TESTNET_USDC_ISSUER
+  const accountJson = await horizon.loadAccount(kp.publicKey());
+  const held = accountJson.balances.find(
+    (balance) => balance.asset_type !== "native"
+      && balance.asset_code === "USDC"
+      && balance.asset_issuer === TESTNET_USDC_ISSUER
   );
-  const stroops = BigInt(Math.floor(Number(held?.balance ?? 0) * 1e7));
+  const stroops = parseXlmToStroops(held?.balance ?? "0");
   if (stroops === 0n) throw new Error("Swap settled but produced no USDC");
   console.log(`Received ${held.balance} USDC — transferring to ${walletContractId}…`);
 
@@ -87,15 +81,13 @@ async function fundUsdc(walletContractId: string, xlmToSwap: string) {
         "transfer",
         new Address(kp.publicKey()).toScVal(),
         new Address(walletContractId).toScVal(),
-        toI128(stroops)
+        nativeToScVal(stroops, { type: "i128" })
       )
     )
     .setTimeout(60)
     .build();
 
-  const sim = await server.simulateTransaction(built);
-  if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
-  const prepared = rpc.assembleTransaction(built, sim).build();
+  const prepared = await server.prepareTransaction(built);
   prepared.sign(kp);
 
   const sent = await server.sendTransaction(prepared);

@@ -532,12 +532,14 @@ COMMON MISTAKES TO AVOID:
       .and_then(|v| i128::try_from_val(e, &v).ok())
       .unwrap_or_else(|| panic_with_error!(e, PolicyError::MissingInstallParam));
   \`\`\`
+  Remember: \`Option::unwrap_or_else\` takes \`||\`; \`Result::unwrap_or_else\` takes \`|_|\`.
   * Every constraint the schema declares is REQUIRED configuration. If its key is absent or
     unparseable, PANIC. Never substitute a permissive fallback: \`unwrap_or(i128::MAX)\` or
     \`unwrap_or(1)\` silently converts a malformed install into an unrestricted policy that
     authorizes everything. That is the exact opposite of this policy's purpose.
   * Only accept \`Val::VOID\` when the schema declares NO constraints and NO global rules at all.
-    If the schema declares anything, a void \`install_params\` must panic.
+    If the schema declares anything, a void \`install_params\` must panic. Check void with
+    \`<()>::try_from_val(e, &install_params).is_ok()\` — \`Val\` cannot be compared to \`Val::VOID\`.
   * A safe default is only acceptable for genuinely optional configuration, and it must be the
     RESTRICTIVE end of the range, never the permissive one.
 - UNITS: every install-param bound is already expressed in the SAME units as the argument it
@@ -661,8 +663,9 @@ CONSTRAINT KINDS:
 WHAT THE TEST HARNESS SENDS for an argument with no constraint: a well-formed, EMPTY value of
 that argument's real type — an empty Vec, an empty Map, empty Bytes, a zeroed BytesN, an empty
 String/Symbol, zero for every numeric type, and \`Val::VOID\` for an \`Option<...>\`, where VOID is
-the correct encoding of \`None\` rather than a placeholder. These are real values of the right
-ScVal type, not stand-ins, so code that decodes them works. But an empty container is not a
+the correct encoding of \`None\` rather than a placeholder. For a user-defined ABI type, the
+harness replays the real ScVal observed in the analyzed transaction. These are real values of
+the right ScVal type, not stand-ins, so code that decodes them works. But an empty container is not a
 MEANINGFUL value: if a note tells you to require something of it ("the path must have at least
 two hops"), a correct implementation of that note will reject the harness's empty Vec and fail
 the very test that proves your policy accepts a compliant call. Implement the note anyway — it
@@ -746,12 +749,12 @@ IMPORTANT: Your enforce() function MUST:
  */
 function buildInstallParamsKeyList(schema: PolicySchema): string {
   const spec = installParamsSpec(schema);
-  if (spec.length === 0) return "  (no configuration needed — install_params may be Val::VOID)";
+  if (spec.length === 0) return "  (no configuration needed — require <()>::try_from_val(e, &install_params).is_ok(); Val cannot be compared to Val::VOID)";
   return spec.map(p => `- "${p.key}" (${p.type}): ${p.description}`).join("\n");
 }
 
 export function buildUserPrompt(schema: PolicySchema): string {
-  // Strip observedValues from the schema before sending to AI.
+  // Strip observed values and XDR fixtures from the schema before sending to AI.
   // These are informational (for the user's UI) and should NOT influence
   // code generation — the AI should only act on explicit constraints.
   const sanitizedSchema: PolicySchema = {
@@ -760,7 +763,7 @@ export function buildUserPrompt(schema: PolicySchema): string {
       ...c,
       functions: c.functions.map(f => ({
         ...f,
-        args: f.args.map(({ observedValues: _, ...rest }) => rest),
+        args: f.args.map(({ observedValues: _, observedXdr: __, ...rest }) => rest),
       })),
     })),
   };
@@ -858,6 +861,8 @@ COMMON FIXES:
 - Remove any imports that are truly unused (or add #[allow(unused_imports)]).
 - symbol_short!() only supports ≤9 char literals. For longer names, use Symbol::new(env, "name").
 - install must take Val: \`pub fn install(e: &Env, install_params: Val, context_rule: ContextRule, smart_account: Address)\`
+- Check for void with \`<()>::try_from_val(e, &install_params).is_ok()\`; never compare \`Val\` to \`Val::VOID\`.
+- \`Option::unwrap_or_else\` takes \`||\`; \`Result::unwrap_or_else\` takes \`|_|\`.
 - "doesn't implement PartialEq"/"doesn't implement Eq" on a struct containing Context: Context derives Clone and Debug but NOT PartialEq/Eq on soroban-sdk 27.0.5. Remove PartialEq/Eq from the derive list (Debug can stay), or store only the fields you need (fn_name, contract) instead of the whole Context.
 - "borrow of partially moved value: context": When matching Context::Contract(ContractContext { contract, fn_name, args }), change args to ref args: \`Context::Contract(ContractContext { contract, fn_name, ref args })\`
 - "use of moved value" or "cannot move out of" for Address/Symbol/String/Vec: These types don't implement Copy. Use .clone() instead of dereferencing: \`fn_name.clone()\` not \`*fn_name\`

@@ -1,27 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
+import { Address, contract, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 
 import { requestContextRules } from "../context-rules";
 import RuleCard from "../../components/rules/RuleCard";
 
-const simulateTransaction = vi.spyOn(rpc.Server.prototype, "simulateTransaction");
+const clientFrom = vi.spyOn(contract.Client, "from");
 const getContractInstance = vi.spyOn(rpc.Server.prototype, "getContractInstance");
+const getCount = vi.fn();
+const getRule = vi.fn();
 
 const WALLET = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 const TARGET = "CCMR63YE5T7MPWREF3PC5XNTTGXFSB4GYUGUIT5POHP2UGCS65TBIUUU";
 const SIGNER = "GAAH4OT36RRCCAGKARGPN2HLHT2NOBVFHO4GUHA6CF7UKQ4MMV24WQ4N";
 const WASM_HASH = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
 const WASM_HASH_HEX = WASM_HASH.toString("hex");
-type SimulationResponse = Awaited<ReturnType<typeof rpc.Server.prototype.simulateTransaction>>;
-
-vi.spyOn(Keypair, "random").mockReturnValue({
-  publicKey: () => SIGNER,
-} as unknown as Keypair);
-
-function success(retval: xdr.ScVal) {
-  return { result: { retval } } as SimulationResponse;
+function assembledResult(retval: xdr.ScVal) {
+  return { result: scValToNative(retval) };
 }
 
 function map(fields: Record<string, xdr.ScVal>): xdr.ScVal {
@@ -64,26 +60,29 @@ function rule(id: number, contextType: xdr.ScVal): xdr.ScVal {
 }
 
 beforeEach(() => {
-  simulateTransaction.mockReset().mockRejectedValue(new Error("unexpected simulation"));
+  getCount.mockReset().mockRejectedValue(new Error("unexpected count lookup"));
+  getRule.mockReset().mockRejectedValue(new Error("unexpected rule lookup"));
+  clientFrom.mockReset().mockResolvedValue({
+    get_context_rules_count: getCount,
+    get_context_rule: getRule,
+  } as any);
   getContractInstance.mockReset().mockRejectedValue(new Error("unexpected instance lookup"));
 });
 
 describe("requestContextRules", () => {
   it("returns immediately for a zero count", async () => {
-    simulateTransaction.mockResolvedValueOnce(success(xdr.ScVal.scvU32(0)));
+    getCount.mockResolvedValueOnce(assembledResult(xdr.ScVal.scvU32(0)));
 
     await expect(requestContextRules(WALLET)).resolves.toEqual({
       success: true,
       error: null,
       rules: [],
     });
-    expect(simulateTransaction).toHaveBeenCalledTimes(1);
+    expect(getCount).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an unsupported count ScVal instead of reporting an empty wallet", async () => {
-    simulateTransaction.mockResolvedValueOnce(success(
-      xdr.ScVal.scvLedgerKeyContractInstance(),
-    ));
+    getCount.mockResolvedValueOnce({ result: xdr.ScVal.scvLedgerKeyContractInstance() });
 
     const result = await requestContextRules(WALLET);
     expect(result.success).toBe(false);
@@ -91,15 +90,15 @@ describe("requestContextRules", () => {
 
   it("decodes real ScVal rules and skips gaps in monotonically increasing IDs", async () => {
     getContractInstance.mockResolvedValueOnce(contractInstance(4));
-    simulateTransaction
-      .mockResolvedValueOnce(success(xdr.ScVal.scvU32(2)))
+    getCount.mockResolvedValueOnce(assembledResult(xdr.ScVal.scvU32(2)));
+    getRule
       .mockRejectedValueOnce(new Error("removed"))
-      .mockResolvedValueOnce(success(rule(1, xdr.ScVal.scvVec([
+      .mockResolvedValueOnce(assembledResult(rule(1, xdr.ScVal.scvVec([
         xdr.ScVal.scvSymbol("CallContract"),
         address(TARGET),
       ]))))
-      .mockResolvedValueOnce(success(xdr.ScVal.scvVoid()))
-      .mockResolvedValueOnce(success(rule(3, xdr.ScVal.scvVec([
+      .mockResolvedValueOnce(assembledResult(xdr.ScVal.scvVoid()))
+      .mockResolvedValueOnce(assembledResult(rule(3, xdr.ScVal.scvVec([
         xdr.ScVal.scvSymbol("CreateContract"),
         xdr.ScVal.scvBytes(WASM_HASH),
       ]))));
@@ -136,14 +135,14 @@ describe("requestContextRules", () => {
         },
       ],
     });
-    expect(simulateTransaction).toHaveBeenCalledTimes(5);
+    expect(getCount).toHaveBeenCalledTimes(1);
+    expect(getRule).toHaveBeenCalledTimes(4);
   });
 
   it("converts bigint counts and defaults missing optional fields", async () => {
     getContractInstance.mockResolvedValueOnce(contractInstance(1));
-    simulateTransaction
-      .mockResolvedValueOnce(success(nativeToScVal(1n, { type: "u64" })))
-      .mockResolvedValueOnce(success(map({
+    getCount.mockResolvedValueOnce({ result: 1n });
+    getRule.mockResolvedValueOnce(assembledResult(map({
         id: xdr.ScVal.scvU32(0),
         name: xdr.ScVal.scvString("Default"),
         context_type: xdr.ScVal.scvSymbol("unexpected"),
@@ -203,11 +202,11 @@ describe("requestContextRules", () => {
 
   it("finds an active rule beyond the old fixed sparse-ID scan window", async () => {
     getContractInstance.mockResolvedValueOnce(contractInstance(6));
-    simulateTransaction.mockResolvedValueOnce(success(xdr.ScVal.scvU32(1)));
+    getCount.mockResolvedValueOnce(assembledResult(xdr.ScVal.scvU32(1)));
     for (let id = 0; id < 5; id++) {
-      simulateTransaction.mockResolvedValueOnce(success(xdr.ScVal.scvVoid()));
+      getRule.mockResolvedValueOnce(assembledResult(xdr.ScVal.scvVoid()));
     }
-    simulateTransaction.mockResolvedValueOnce(success(rule(5, xdr.ScVal.scvVec([]))));
+    getRule.mockResolvedValueOnce(assembledResult(rule(5, xdr.ScVal.scvVec([]))));
 
     const result = await requestContextRules(WALLET);
     expect(result.rules).toHaveLength(1);
@@ -215,7 +214,7 @@ describe("requestContextRules", () => {
   });
 
   it("returns a stable failure shape when count simulation fails", async () => {
-    simulateTransaction.mockResolvedValueOnce({ error: "rpc unavailable" } as SimulationResponse);
+    getCount.mockRejectedValueOnce(new Error("Simulation failed: rpc unavailable"));
 
     await expect(requestContextRules(WALLET)).resolves.toEqual({
       success: false,

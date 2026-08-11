@@ -11,6 +11,8 @@ import {
   Operation,
   StrKey,
   Asset,
+  Horizon,
+  authorizeEntry,
   scValToNative,
 } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
@@ -20,13 +22,11 @@ import {
   createPasskey,
   authenticatePasskey,
   findSignerPublicKey,
-  signWithPasskey,
   buildKeyData,
-  buildSignaturePayload,
   buildAuthDigest,
-  buildWebAuthnSigBytes,
   writeAuthPayload,
   signKeypairAuthEntries,
+  signWalletAuthEntries,
   deriveContractAddress,
   toI128,
   parseXlmToStroops,
@@ -50,10 +50,71 @@ import {
 } from "../lib/passkey";
 import type { StoredWallet, TokenCode } from "../lib/passkey";
 import { requestContextRules, type ContextRuleInfo } from "../lib/context-rules";
+import { assertTransactionSuccess } from "../lib/rule-management";
 import { TESTNET_HORIZON_URL } from "../lib/constants";
 
 const BASE_FEE = "1000000";
 const server = new rpc.Server(TESTNET_RPC_URL);
+const horizon = new Horizon.Server(TESTNET_HORIZON_URL);
+
+async function waitForTransaction(hash: string, attempts = 15) {
+  const result = await server.pollTransaction(hash, { attempts });
+  assertTransactionSuccess(result.status);
+  return result;
+}
+
+async function waitForRpcAccount(publicKey: string) {
+  let error: unknown;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      return await server.getAccount(publicKey);
+    } catch (caught) {
+      error = caught;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  throw error;
+}
+
+async function waitForFriendbot(response: Response) {
+  if (!response.ok) throw new Error("Friendbot failed");
+  const { hash } = await response.json() as { hash?: string };
+  if (!hash) throw new Error("Friendbot response had no transaction hash");
+  const result = await waitForTransaction(hash, 30);
+  for (let attempt = 0; attempt < 30; attempt++) {
+    if ((await server.getLatestLedger()).sequence > result.ledger) return;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error("Stellar RPC did not advance after Friendbot funding");
+}
+
+async function simulateWhenAccountReady(
+  transaction: Parameters<typeof server.simulateTransaction>[0],
+) {
+  let error = "";
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const result = await server.simulateTransaction(transaction);
+    if (!("error" in result)) return result;
+    error = String((result as any).error);
+    if (!error.includes("account entry is missing")) {
+      throw new Error(`Simulation failed: ${error}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`Simulation failed: ${error}`);
+}
+
+async function submitFreshAccountTransaction(
+  input: Parameters<typeof requestSubmitToRelayer>[0],
+) {
+  let result = await requestSubmitToRelayer(input);
+  for (let attempt = 1; attempt < 15; attempt++) {
+    if (result.success || !result.error?.includes("Auth, InvalidAction")) return result;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    result = await requestSubmitToRelayer(input);
+  }
+  return result;
+}
 
 /** Friendbot gives 10,000 XLM. Reserve 5 XLM in the temp account for the transfer fee + base reserve. */
 const FRIENDBOT_TRANSFER_XLM = 9_995n;
@@ -123,8 +184,10 @@ export function useWallet() {
         ? BigInt(parsed.amount)
         : (typeof parsed === "bigint" ? parsed : 0n);
       setBalance((Number(amount) / STROOPS_PER_XLM).toFixed(2));
+      return amount;
     } catch {
       setBalance("0.00");
+      return 0n;
     }
   }, []);
 
@@ -204,9 +267,8 @@ export function useWallet() {
       });
       if (!deployResult.success) throw new Error(deployResult.error || "Deploy failed");
 
-      if (deployResult.hash) {
-        await server.pollTransaction(deployResult.hash, { attempts: 15 });
-      }
+      if (!deployResult.hash) throw new Error("Relayer returned no wallet deployment hash");
+      await waitForTransaction(deployResult.hash);
 
       const walletData: StoredWallet = {
         credentialId,
@@ -317,7 +379,7 @@ export function useWallet() {
     try {
       const tempKeypair = Keypair.random();
       const res = await fetch(`${FRIENDBOT_URL}?addr=${tempKeypair.publicKey()}`);
-      if (!res.ok) throw new Error("Friendbot failed");
+      await waitForFriendbot(res);
 
       setStatus("Transferring to smart wallet via relayer...");
 
@@ -326,8 +388,8 @@ export function useWallet() {
         tempKeypair.publicKey(), wallet.contractId, transferAmount
       );
 
-      const sourceAccount = await server.getAccount(tempKeypair.publicKey());
-      const simTx = new TransactionBuilder(sourceAccount, {
+      await waitForRpcAccount(tempKeypair.publicKey());
+      const simTx = new TransactionBuilder(new Account(Keypair.random().publicKey(), "0"), {
         fee: BASE_FEE,
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
       })
@@ -335,26 +397,28 @@ export function useWallet() {
         .setTimeout(30)
         .build();
 
-      const simResult = await server.simulateTransaction(simTx);
-      if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
-      const simSuccess = simResult as rpc.Api.SimulateTransactionSuccessResponse;
+      const simSuccess = await simulateWhenAccountReady(simTx);
 
-      const signedAuth = signKeypairAuthEntries(
+      const signedAuth = await signKeypairAuthEntries(
         simSuccess.result?.auth ?? [], tempKeypair,
         simSuccess.latestLedger + LEDGERS_PER_HOUR, TESTNET_NETWORK_PASSPHRASE
       );
 
-      const relayerResult = await requestSubmitToRelayer({
+      const relayerResult = await submitFreshAccountTransaction({
         func: hostFunc.toXDR("base64"),
         auth: signedAuth.map((e) => e.toXDR("base64")),
       });
       if (!relayerResult.success) throw new Error(relayerResult.error || "Fund via relayer failed");
 
-      if (relayerResult.hash) {
-        await server.pollTransaction(relayerResult.hash, { attempts: 15 });
-      }
+      if (!relayerResult.hash) throw new Error("Relayer returned no funding transaction hash");
+      await waitForTransaction(relayerResult.hash);
 
-      await fetchBalance(wallet.contractId, tokenContractFor(tokenCode));
+      let funded = 0n;
+      for (let attempt = 0; attempt < 15 && funded === 0n; attempt++) {
+        funded = await fetchBalance(wallet.contractId, tokenContractFor(tokenCode));
+        if (funded === 0n) await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      if (funded === 0n) throw new Error("Funding settled but balance did not update");
       if (relayerResult.hash) setLastTxHash(relayerResult.hash);
       setStatus("Funded!");
       setStatusKind("done");
@@ -383,21 +447,21 @@ export function useWallet() {
     try {
       const tempKeypair = Keypair.random();
       const friendbotRes = await fetch(`${FRIENDBOT_URL}?addr=${tempKeypair.publicKey()}`);
-      if (!friendbotRes.ok) throw new Error("Friendbot failed");
+      await waitForFriendbot(friendbotRes);
 
       setStatus("Quoting XLM → USDC...");
       const usdc = new Asset("USDC", TESTNET_USDC_ISSUER);
-      const quoteRes = await fetch(
-        `${TESTNET_HORIZON_URL}/paths/strict-send?source_asset_type=native` +
-        `&source_amount=${USDC_SWAP_XLM}&destination_assets=USDC%3A${TESTNET_USDC_ISSUER}`
-      );
-      const quote = await quoteRes.json() as any;
-      const best = quote?._embedded?.records?.[0];
+      const quote = await horizon.strictSendPaths(
+        Asset.native(),
+        USDC_SWAP_XLM,
+        [usdc],
+      ).call();
+      const best = quote.records[0];
       if (!best) throw new Error("No XLM → USDC path on testnet right now — try again shortly");
       const destMin = (Number(best.destination_amount) * SWAP_SLIPPAGE).toFixed(7);
 
       setStatus(`Swapping ${USDC_SWAP_XLM} XLM for ~${Number(best.destination_amount).toFixed(2)} USDC...`);
-      const tempAccount = await server.getAccount(tempKeypair.publicKey());
+      const tempAccount = await waitForRpcAccount(tempKeypair.publicKey());
       const swapTx = new TransactionBuilder(tempAccount, {
         fee: BASE_FEE,
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
@@ -425,12 +489,13 @@ export function useWallet() {
       if (swapFinal.status !== "SUCCESS") throw new Error(`Swap failed: ${swapFinal.status}`);
 
       // Move everything the swap actually produced, not the quote — the fill can beat destMin.
-      const accountRes = await fetch(`${TESTNET_HORIZON_URL}/accounts/${tempKeypair.publicKey()}`);
-      const accountJson = await accountRes.json() as any;
-      const usdcBalance = accountJson.balances?.find(
-        (b: any) => b.asset_code === "USDC" && b.asset_issuer === TESTNET_USDC_ISSUER
+      const account = await horizon.loadAccount(tempKeypair.publicKey());
+      const usdcBalance = account.balances.find(
+        (balance) => balance.asset_type !== "native"
+          && balance.asset_code === "USDC"
+          && balance.asset_issuer === TESTNET_USDC_ISSUER
       );
-      const usdcStroops = BigInt(Math.floor(Number(usdcBalance?.balance ?? 0) * STROOPS_PER_XLM));
+      const usdcStroops = parseXlmToStroops(usdcBalance?.balance ?? "0");
       if (usdcStroops === 0n) throw new Error("Swap settled but produced no USDC");
 
       setStatus("Transferring USDC to smart wallet...");
@@ -438,8 +503,7 @@ export function useWallet() {
         tempKeypair.publicKey(), wallet.contractId, usdcStroops, TESTNET_USDC_TOKEN_CONTRACT
       );
 
-      const sourceAccount = await server.getAccount(tempKeypair.publicKey());
-      const simTx = new TransactionBuilder(sourceAccount, {
+      const simTx = new TransactionBuilder(new Account(Keypair.random().publicKey(), "0"), {
         fee: BASE_FEE,
         networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
       })
@@ -447,24 +511,21 @@ export function useWallet() {
         .setTimeout(30)
         .build();
 
-      const simResult = await server.simulateTransaction(simTx);
-      if ("error" in simResult) throw new Error(`Simulation failed: ${(simResult as any).error}`);
-      const simSuccess = simResult as rpc.Api.SimulateTransactionSuccessResponse;
+      const simSuccess = await simulateWhenAccountReady(simTx);
 
-      const signedAuth = signKeypairAuthEntries(
+      const signedAuth = await signKeypairAuthEntries(
         simSuccess.result?.auth ?? [], tempKeypair,
         simSuccess.latestLedger + LEDGERS_PER_HOUR, TESTNET_NETWORK_PASSPHRASE
       );
 
-      const relayerResult = await requestSubmitToRelayer({
+      const relayerResult = await submitFreshAccountTransaction({
         func: hostFunc.toXDR("base64"),
         auth: signedAuth.map((e) => e.toXDR("base64")),
       });
       if (!relayerResult.success) throw new Error(relayerResult.error || "USDC transfer via relayer failed");
-      if (relayerResult.hash) {
-        await server.pollTransaction(relayerResult.hash, { attempts: 15 });
-        setLastTxHash(relayerResult.hash);
-      }
+      if (!relayerResult.hash) throw new Error("Relayer returned no USDC transfer hash");
+      await waitForTransaction(relayerResult.hash);
+      setLastTxHash(relayerResult.hash);
 
       setTokenCode("USDC");
       await fetchBalance(wallet.contractId, TESTNET_USDC_TOKEN_CONTRACT);
@@ -500,9 +561,6 @@ export function useWallet() {
           throw new Error(`Insufficient balance: you have ${balance} ${tokenCode}`);
         }
       }
-
-      const keyData = buildKeyData(Buffer.from(wallet.publicKey, "hex"), wallet.credentialId);
-      const signer = { tag: "External" as const, values: [TESTNET_WEBAUTHN_VERIFIER, keyData] as const };
 
       // Determine the selected context rule
       const selectedRule = contextRules.find(r => r.id === selectedRuleId);
@@ -618,46 +676,31 @@ export function useWallet() {
         });
         if (!walletEntry) throw new Error("No auth entry found for wallet");
 
-        walletEntry.credentials().address().signatureExpirationLedger(expiration);
-
-        const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, walletEntry, expiration);
-        const authDigest = buildAuthDigest(sigPayload, [selectedRuleId]);
-
-        // ed25519 sign the auth_digest directly — the verifier contract
-        // calls e.crypto().ed25519_verify(pubkey, auth_digest, signature)
-        const ed25519Sig = ephemeralKeypair.sign(Buffer.from(authDigest));
-
-        // Build AuthPayload with External signer, same pattern as the passkey
-        const rawPubkey = ephemeralKeypair.rawPublicKey();
-        const signer = {
-          tag: "External" as const,
-          values: [TESTNET_ED25519_VERIFIER, Buffer.from(rawPubkey)] as const,
-        };
-        walletEntry.credentials().address().signature(
-          writeAuthPayload([selectedRuleId], signer, Buffer.from(ed25519Sig))
-        );
-
-        signedAuthEntries = [walletEntry];
+        signedAuthEntries = [await authorizeEntry(
+          walletEntry,
+          async (_preimage, payload) => ({
+            signatureScVal: writeAuthPayload(
+              [selectedRuleId],
+              {
+                tag: "External",
+                values: [TESTNET_ED25519_VERIFIER, Buffer.from(ephemeralKeypair.rawPublicKey())],
+              },
+              Buffer.from(ephemeralKeypair.sign(buildAuthDigest(payload, [selectedRuleId]))),
+            ),
+          }),
+          expiration,
+          TESTNET_NETWORK_PASSPHRASE,
+          wallet.contractId,
+        )];
       } else {
         // --- Default: passkey signing ---
         setStatus("Sign with your passkey...");
-        signedAuthEntries = [];
-        for (const entry of authEntries) {
-          const credType = entry.credentials().switch().name;
-          if (credType === "sorobanCredentialsAddress") {
-            const credentials = entry.credentials().address();
-            credentials.signatureExpirationLedger(expiration);
-            if (Address.fromScAddress(credentials.address()).toString() === wallet.contractId) {
-              const sigPayload = buildSignaturePayload(TESTNET_NETWORK_PASSPHRASE, entry, expiration);
-              const authDigest = buildAuthDigest(sigPayload, [selectedRuleId]);
-              const webAuthnResult = await signWithPasskey(wallet.credentialId, authDigest);
-              credentials.signature(
-                writeAuthPayload([selectedRuleId], signer, buildWebAuthnSigBytes(webAuthnResult))
-              );
-            }
-          }
-          signedAuthEntries.push(entry);
-        }
+        signedAuthEntries = await signWalletAuthEntries({
+          authEntries,
+          wallet,
+          contextRuleIds: [selectedRuleId],
+          expiration,
+        });
       }
 
       setStatus("Submitting via relayer...");
@@ -675,9 +718,8 @@ export function useWallet() {
       const relayerResult = await requestSubmitToRelayer({ func: funcXdr, auth: authXdr });
       if (!relayerResult.success) throw new Error(relayerResult.error || "Relayer failed");
 
-      if (relayerResult.hash) {
-        await server.pollTransaction(relayerResult.hash, { attempts: 15 });
-      }
+      if (!relayerResult.hash) throw new Error("Relayer returned no transfer hash");
+      await waitForTransaction(relayerResult.hash);
 
       await fetchBalance(wallet.contractId, tokenContractFor(tokenCode));
       if (relayerResult.hash) setLastTxHash(relayerResult.hash);

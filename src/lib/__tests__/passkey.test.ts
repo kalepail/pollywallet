@@ -40,6 +40,7 @@ import {
   loadWallet,
   parseXlmToStroops,
   saveWallet,
+  signKeypairAuthEntries,
   signWithPasskey,
   authenticatePasskey,
   buildKeyData,
@@ -104,6 +105,15 @@ describe("key and digest byte construction", () => {
   it("pins the deterministic deployer seed to its public key", () => {
     expect(DEPLOYER_PUBLIC_KEY).toBe("GDWAZVMP6766SAM2HRO6W2QIANU64KUTINIDC5ZQWRS5NAX25CZOHIQV");
   });
+});
+
+it("rejects source-account auth entries that a relayer cannot submit", async () => {
+  const sourceAuth = {
+    credentials: () => ({ switch: () => ({ name: "sorobanCredentialsSourceAccount" }) }),
+  };
+  await expect(signKeypairAuthEntries(
+    [sourceAuth as any], {} as any, 100, "Test SDF Network ; September 2015",
+  )).rejects.toThrow("simulate with a different transaction source");
 });
 
 describe("WebAuthn boundaries", () => {

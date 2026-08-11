@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Address, xdr } from "@stellar/stellar-sdk";
+import { rpc, xdr } from "@stellar/stellar-sdk";
 import { requestContractSpec } from "../contract-spec";
 
 const CONTRACT = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
@@ -27,39 +27,15 @@ function wasmWithSpec(entries: xdr.ScSpecEntry[]): Buffer {
   ]);
 }
 
-function instanceXdr(executable: xdr.ContractExecutable): string {
-  const instance = new xdr.ScContractInstance({ executable, storage: null });
-  const entry = new xdr.ContractDataEntry({
-    ext: new xdr.ExtensionPoint(0),
-    contract: Address.fromString(CONTRACT).toScAddress(),
-    key: xdr.ScVal.scvLedgerKeyContractInstance(),
-    durability: xdr.ContractDataDurability.persistent(),
-    val: xdr.ScVal.scvContractInstance(instance),
-  });
-  return xdr.LedgerEntryData.contractData(entry).toXDR("base64");
-}
-
-function codeXdr(wasm: Buffer): string {
-  const entry = new xdr.ContractCodeEntry({
-    ext: new xdr.ContractCodeEntryExt(0),
-    hash: WASM_HASH,
-    code: wasm,
-  });
-  return xdr.LedgerEntryData.contractCode(entry).toXDR("base64");
-}
+const getContractInstance = vi.spyOn(rpc.Server.prototype, "getContractInstance");
+const getContractWasmByHash = vi.spyOn(rpc.Server.prototype, "getContractWasmByHash");
 
 function mockRpc(wasm: Buffer) {
-  const fetchMock = vi.fn()
-    .mockResolvedValueOnce({
-      json: async () => ({ result: { entries: [{ xdr: instanceXdr(
-        xdr.ContractExecutable.contractExecutableWasm(WASM_HASH),
-      ) }] } }),
-    })
-    .mockResolvedValueOnce({
-      json: async () => ({ result: { entries: [{ xdr: codeXdr(wasm) }] } }),
-    });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
+  getContractInstance.mockResolvedValueOnce(new xdr.ScContractInstance({
+    executable: xdr.ContractExecutable.contractExecutableWasm(WASM_HASH),
+    storage: null,
+  }));
+  getContractWasmByHash.mockResolvedValueOnce(wasm);
 }
 
 function functionEntry(
@@ -80,7 +56,11 @@ function functionEntry(
   }));
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  getContractInstance.mockReset();
+  getContractWasmByHash.mockReset();
+});
 
 describe("requestContractSpec", () => {
   it("rejects invalid input without making a network request", async () => {
@@ -99,12 +79,10 @@ describe("requestContractSpec", () => {
   });
 
   it("returns the standardized SAC spec from a real instance XDR", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      json: async () => ({ result: { entries: [{ xdr: instanceXdr(
-        xdr.ContractExecutable.contractExecutableStellarAsset(),
-      ) }] } }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    getContractInstance.mockResolvedValueOnce(new xdr.ScContractInstance({
+      executable: xdr.ContractExecutable.contractExecutableStellarAsset(),
+      storage: null,
+    }));
 
     const result = await requestContractSpec(CONTRACT);
 
@@ -119,7 +97,8 @@ describe("requestContractSpec", () => {
       outputs: [],
     });
     expect(result.spec?.functions.find(({ name }) => name === "decimals")?.inputs).toEqual([]);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getContractInstance).toHaveBeenCalledTimes(1);
+    expect(getContractWasmByHash).not.toHaveBeenCalled();
   });
 
   it("parses real function and custom-type XDR, including nested and unicode entries", async () => {
@@ -236,15 +215,12 @@ describe("requestContractSpec", () => {
   });
 
   it("reports a missing contract without attempting a WASM lookup", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      json: async () => ({ result: { entries: [] } }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    getContractInstance.mockRejectedValueOnce({ code: 404 });
 
     await expect(requestContractSpec(CONTRACT)).resolves.toMatchObject({
       success: false,
       error: `Contract not found: ${CONTRACT}`,
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getContractWasmByHash).not.toHaveBeenCalled();
   });
 });

@@ -434,14 +434,21 @@ describe("harness-representable argument types", () => {
   );
 
   it.each(["Profile", "(u32, address)", "Result<u32, error>", "val", "bytes<N>"])(
-    "rejects unrepresentable type %s instead of letting the positive control use VOID",
+    "rejects unrepresentable type %s when no analyzed fixture exists",
     (type) => {
       const result = validateSchema(withArg(type));
       expect(result.valid).toBe(false);
       expect(result.errors.join(" ")).toContain(`type "${type}"`);
-      expect(result.errors.join(" ")).toMatch(/test harness cannot represent/);
+      expect(result.errors.join(" ")).toMatch(/analyzed transaction fixture/);
     },
   );
+
+  it("accepts a user-defined ABI type when analysis supplied a real ScVal fixture", () => {
+    const schema = withArg("ChannelOperation");
+    schema.contracts[0].functions[0].args[0].observedXdr =
+      "AAAAEAAAAAEAAAACAAAADwAAAAdEZXBvc2l0AAAAAAMAAAAH";
+    expect(validateSchema(schema).valid).toBe(true);
+  });
 
   it.each([
     "address", "i128", "u128", "i64", "u64", "i32", "u32", "bool", "symbol",
@@ -498,7 +505,7 @@ describe("schemaFromPatterns", () => {
       contractAddress: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
       functionName: "transfer",
       args: [
-        { type: "Address", value: "GSOURCE" },
+        { type: "Address", value: "GSOURCE", xdr: "fixture-xdr" },
         { type: "Address", value: "GDEST123" },
         { type: "i128", value: "50000000" },
       ],
@@ -514,6 +521,7 @@ describe("schemaFromPatterns", () => {
     expect(func.args.length).toBe(3);
     expect(func.args[0].type).toBe("Address");
     expect(func.args[0].observedValues).toContain("GSOURCE");
+    expect(func.args[0].observedXdr).toBe("fixture-xdr");
   });
 
   it("should use innerCall for execute() patterns", () => {
@@ -601,6 +609,25 @@ describe("mergeSpecIntoSchema", () => {
     expect(func.args[2].type).toBe("i128");
     // Observed values should be preserved
     expect(func.args[0].observedValues).toContain("GFROM");
+  });
+
+  it("preserves an observed custom-type XDR fixture during spec enrichment", () => {
+    const schema = schemaFromPatterns([{
+      contractAddress: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
+      functionName: "open_channel",
+      args: [{ type: "vec", value: "[]", xdr: "fixture-xdr" }],
+      signers: [],
+    }]);
+    const merged = mergeSpecIntoSchema(schema, schema.contracts[0].address, [{
+      name: "open_channel",
+      inputs: [{ name: "op", type: "ChannelOperation" }],
+    }]);
+
+    expect(merged.contracts[0].functions[0].args[0]).toMatchObject({
+      name: "op",
+      type: "ChannelOperation",
+      observedXdr: "fixture-xdr",
+    });
   });
 });
 

@@ -61,8 +61,12 @@ wait_text() {
 }
 
 wait_enabled_button() {
-  local name="$1" timeout="$2" snapshot line
+  local name="$1" timeout="$2" errors="${3:-}" snapshot line page
   for ((i = 0; i < timeout; i += 2)); do
+    page="$(body)"
+    if [[ -n "$errors" ]] && grep -Eq "$errors" <<<"$page"; then
+      fail "$(grep -Em1 "$errors" <<<"$page")"
+    fi
     snapshot="$(ab snapshot -i 2>/dev/null || true)"
     line="$(grep -F "button \"$name\"" <<<"$snapshot" || true)"
     [[ -n "$line" && "$line" != *disabled* ]] && return 0
@@ -73,12 +77,12 @@ wait_enabled_button() {
 
 echo "=== 0. Create and fund passkey wallet ==="
 ab find role button click --name "Create Smart Wallet" >/dev/null
-wait_text "Wallet created!" 180 "Simulation failed|Deploy failed|Relayer not configured|Something went wrong"
+wait_text "Wallet created!" 180 "Malformed response|Simulation failed|Deploy failed|Relayer not configured|Something went wrong"
 WALLET_ADDR="$(body | grep -Eom1 'C[A-Z2-7]{55}')"
 [[ -n "$WALLET_ADDR" ]] || fail "wallet contract address missing"
 
-ab find role button click --name "Fund with Friendbot" >/dev/null
-wait_text "Funded!" 180 "Friendbot failed|Simulation failed|Fund via relayer failed|Something went wrong"
+ab find role button click --name "Fund XLM" >/dev/null
+wait_text "Funded!" 180 "Friendbot failed|Account not found|Simulation failed|Signed auth entry validation failed|Fund via relayer failed|Something went wrong"
 grep -Eq '[1-9][0-9]*\.[0-9]+ XLM' <<<"$(body)" || fail "wallet balance did not increase"
 echo "PASS wallet: $WALLET_ADDR"
 
@@ -106,13 +110,14 @@ echo "PASS generation"
 
 echo "=== 4. Compile and test ==="
 ab find role button click --name "Test in Sandbox" >/dev/null
-wait_text "3 passed" 900 "Compilation failed after [0-9]+ fix attempt|[0-9]+ test\(s\) failed"
-wait_enabled_button "Deploy to Testnet" 180
-echo "PASS sandbox: 3 passed"
+wait_enabled_button "Deploy to Testnet" 900 "Compilation failed after [0-9]+ fix attempt|[0-9]+ test\(s\) failed"
+PASSED="$(body | grep -Eom1 '[0-9]+ passed')"
+[[ -n "$PASSED" ]] || fail "sandbox pass count missing"
+echo "PASS sandbox: $PASSED"
 
 echo "=== 5. Deploy policy ==="
 ab find role button click --name "Deploy to Testnet" >/dev/null
-wait_text "Install Policy on Wallet" 300 "Deploy failed \(|Deployment failed|Sandbox service not configured"
+wait_text "Install Policy on Wallet" 300 "WASM upload failed|Deploy failed|Deployment failed|Sandbox service not configured"
 DEPLOY_BODY="$(body)"
 POLICY_ADDR="$(grep -Eo 'C[A-Z2-7]{55}' <<<"$DEPLOY_BODY" | tail -1)"
 WASM_HASH="$(grep -Eo '[0-9a-f]{64}' <<<"$DEPLOY_BODY" | tail -1)"
@@ -131,7 +136,7 @@ NODE
 
 echo "=== 6. Install policy on wallet ==="
 ab find role button click --name "Install on Wallet" >/dev/null
-wait_text "Policy Installed" 300 "Failed to call requestAddContextRule|Simulation request failed|Simulation failed:|Relayer failed|Passkey signing was cancelled|Install failed"
+wait_text "Policy Installed" 300 "Failed to call requestAddContextRule|Simulation request failed|Simulation failed|Relayer failed|Passkey signing was cancelled|Install failed"
 INSTALL_BODY="$(body)"
 RULE_ID="$(awk '/Context Rule ID/{found=1; next} found && NF{print; exit}' <<<"$INSTALL_BODY")"
 EPHEMERAL="$(grep -Eo 'G[A-Z2-7]{55}' <<<"$INSTALL_BODY" | tail -1)"
@@ -144,12 +149,22 @@ export WALLET_ADDR TARGET_ADDR RULE_ID EPHEMERAL INSTALL_TX
 node --input-type=module <<'NODE'
 import { rpc, StrKey } from "@stellar/stellar-sdk";
 const server = new rpc.Server("https://soroban-testnet.stellar.org");
-const tx = await server.getTransaction(process.env.INSTALL_TX);
+const tx = await server.pollTransaction(process.env.INSTALL_TX, { attempts: 60 });
 if (tx.status !== "SUCCESS") throw new Error(`install transaction status: ${tx.status}`);
-const count = await server.queryContract(process.env.WALLET_ADDR, "get_context_rules_count");
-const rule = (await server.queryContract(process.env.WALLET_ADDR, "get_context_rule", {
-  context_rule_id: Number(process.env.RULE_ID),
-})).result;
+let count, rule, queryError;
+for (let attempt = 0; attempt < 60; attempt++) {
+  try {
+    count = await server.queryContract(process.env.WALLET_ADDR, "get_context_rules_count");
+    rule = (await server.queryContract(process.env.WALLET_ADDR, "get_context_rule", {
+      context_rule_id: Number(process.env.RULE_ID),
+    })).result;
+    break;
+  } catch (error) {
+    queryError = error;
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+}
+if (!count || !rule) throw queryError;
 const signer = StrKey.encodeEd25519PublicKey(Buffer.from(rule.signers[0].values[1]));
 if (count.result < 2) throw new Error(`context rule count: ${count.result}`);
 if (rule.id !== Number(process.env.RULE_ID)) throw new Error(`wrong rule id: ${rule.id}`);
@@ -164,7 +179,9 @@ ab open "$BASE_URL/rules" >/dev/null
 wait_text "auto-policy" 120 "Failed to fetch context rules"
 ab find role heading click --name "auto-policy" >/dev/null
 wait_enabled_button "Code" 120
-grep -Fq "$POLICY_ADDR" <<<"$(body)" || fail "policy address missing from Rules listing"
+RULES_BODY="$(body)"
+grep -Fq "${POLICY_ADDR:0:10}" <<<"$RULES_BODY" && grep -Fq "${POLICY_ADDR: -10}" <<<"$RULES_BODY" \
+  || fail "policy address missing from Rules listing"
 ab find role button click --name "Code" >/dev/null
 wait_text "Rust source" 60
 grep -Fq "pub struct PolicyContract" <<<"$(body)" || fail "saved Rust source missing from policy-store listing"

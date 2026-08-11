@@ -220,6 +220,13 @@ an otherwise unconstrained `i128` is the clean example — `generateArgBuilderLi
 the compliant call is rejected, and the run fails while the policy is right. Prefer a
 constraint; reach for a note only when no constraint can say it.
 
+User-defined ABI arguments need a real positive fixture. Transaction analysis keeps one raw
+ScVal XDR value per argument; after spec enrichment changes a generic `vec`/`map` label into a
+name such as `ChannelOperation`, the harness replays that XDR with `Val::from_xdr`. Do not replace
+it with `Val::VOID` or a scalar stand-in: a policy that legitimately decodes the custom type
+would then fail during test setup. A manually entered custom type without an analyzed fixture is
+rejected with an instruction to analyze a representative transaction.
+
 **Verify harness changes with a real cargo build, not by reading the output.** The loop that
 found and settled all of the above: emit `generateTestCases(schema)` to a file, append it to a
 hand-written correct policy under `#[cfg(test)] mod tests`, `cargo test` (fast — no wasm target
@@ -367,6 +374,8 @@ So the encoding is correct. The **defaulting** is the bug. Any instruction of th
 use maximum/permissive defaults", converts a malformed install into a policy that
 authorizes everything. Every constraint the schema declares is required configuration:
 absent or unparseable ⇒ panic. Decode with `TryFromVal`, never `FromVal` + `unwrap()`.
+For a no-configuration policy, validate void with `<()>::try_from_val(e, &install_params)`;
+`Val` does not implement `PartialEq` with the `Val::VOID` marker.
 
 ### 3. The ABI is `Val`, but the trait is typed
 

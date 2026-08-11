@@ -1,7 +1,11 @@
-import { getSandbox, parseSSEStream, type ExecEvent, type Sandbox as SandboxType } from "@cloudflare/sandbox";
+import { getSandbox, parseSSEStream, Sandbox as BaseSandbox, type ExecEvent, type Sandbox as SandboxType } from "@cloudflare/sandbox";
 import { parseTestOutput } from "./parse-test-output";
 
-export { Sandbox } from "@cloudflare/sandbox";
+export { ContainerProxy } from "@cloudflare/sandbox";
+
+export class Sandbox extends BaseSandbox {
+  allowedHosts = ["soroban-testnet.stellar.org", "friendbot.stellar.org"];
+}
 
 type Env = {
   Sandbox: DurableObjectNamespace<SandboxType>;
@@ -389,53 +393,52 @@ async function handleDeploy(
     // Deploy the contract using stellar-cli in two separate steps to avoid
     // timing issues where the WASM upload hasn't propagated before deploy runs.
 
-    // Step 1: Install (upload) the WASM to the network
-    const installResult = await sandbox.exec(
-      `stellar contract install --wasm ${wasmPath} --source-account deployer --network testnet 2>&1`,
+    // Step 1: Upload the WASM to the network
+    let installResult = await sandbox.exec(
+      `stellar contract upload --wasm ${wasmPath} --source-account deployer --network testnet 2>&1`,
       { timeout: 120_000 }
     );
 
-    const installOutput = (installResult.stdout + installResult.stderr).trim();
+    let installOutput = (installResult.stdout + installResult.stderr).trim();
 
-    // The install command must succeed before we extract the hash.
+    // The upload command must succeed before we extract the hash.
     // Otherwise the CLI may print the locally-computed hash in an error
     // message and we'd try to deploy code that never made it on-ledger.
     if (!installResult.success) {
-      // If the deployer is out of funds, try to re-fund and retry once
-      if (installOutput.includes("insufficient") || installOutput.includes("NotFound") || installOutput.includes("not found")) {
-        await sandbox.exec(
-          `stellar keys fund deployer --network testnet 2>&1`,
-          { timeout: 60_000 }
-        );
-
-        const retryResult = await sandbox.exec(
-          `stellar contract install --wasm ${wasmPath} --source-account deployer --network testnet 2>&1`,
-          { timeout: 120_000 }
-        );
-
-        const retryOutput = (retryResult.stdout + retryResult.stderr).trim();
-        if (!retryResult.success) {
-          return Response.json({
-            success: false,
-            error: `WASM install failed after re-funding deployer: ${retryOutput.slice(0, 2000)}`,
-            wasmHash: null,
-            contractAddress: null,
-          });
+      // If the deployer is out of funds, re-fund and retry while the RPC catches up.
+      const accountError = installOutput.includes("insufficient")
+        || installOutput.includes("NotFound")
+        || installOutput.includes("not found");
+      const transientError = accountError || installOutput.includes("client error (Connect)");
+      if (transientError) {
+        if (accountError) {
+          await sandbox.exec(
+            `stellar keys fund deployer --network testnet 2>&1`,
+            { timeout: 60_000 }
+          );
         }
 
-        // Use the retry output for hash extraction below
-        Object.assign(installResult, retryResult);
-      } else {
+        for (let attempt = 0; attempt < 20 && !installResult.success; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          installResult = await sandbox.exec(
+            `stellar contract upload --wasm ${wasmPath} --source-account deployer --network testnet 2>&1`,
+            { timeout: 120_000 }
+          );
+          installOutput = (installResult.stdout + installResult.stderr).trim();
+        }
+      }
+
+      if (!installResult.success) {
         return Response.json({
           success: false,
-          error: `WASM install failed (exit code non-zero): ${installOutput.slice(0, 2000)}`,
+          error: `WASM upload failed: ${installOutput.slice(0, 2000)}`,
           wasmHash: null,
           contractAddress: null,
         });
       }
     }
 
-    // Extract the WASM hash — only from successful install output.
+    // Extract the WASM hash — only from successful upload output.
     // The hash is the last 64-char hex string (the CLI may print a
     // transaction hash before it).
     const finalOutput = (installResult.stdout + installResult.stderr).trim();
@@ -445,17 +448,17 @@ async function handleDeploy(
     if (!wasmHash) {
       return Response.json({
         success: false,
-        error: `WASM install succeeded but no hash found in output: ${finalOutput.slice(0, 2000)}`,
+        error: `WASM upload succeeded but no hash found in output: ${finalOutput.slice(0, 2000)}`,
         wasmHash: null,
         contractAddress: null,
       });
     }
 
     // Step 2: Deploy the contract from the installed WASM hash
-    // Retry up to 5 times with increasing delays to handle propagation timing
+    // Testnet RPC nodes can trail a successful upload by over a minute.
     let contractAddress: string | null = null;
     let deployOutput = "";
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 20; attempt++) {
       if (attempt > 0) {
         await new Promise((resolve) => setTimeout(resolve, 5000));
       }
@@ -475,7 +478,7 @@ async function handleDeploy(
       }
 
       // If it looks like a propagation error, retry
-      if (deployOutput.includes("not found") || deployOutput.includes("NotFound")) {
+      if (deployOutput.includes("not found") || deployOutput.includes("NotFound") || deployOutput.includes("Wasm does not exist")) {
         continue;
       }
 

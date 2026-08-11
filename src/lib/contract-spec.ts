@@ -1,6 +1,4 @@
-import {
-  xdr, Address, contract, rpc, Contract, TransactionBuilder, Account, Keypair, scValToNative,
-} from "@stellar/stellar-sdk";
+import { contract, rpc, xdr } from "@stellar/stellar-sdk";
 import { TESTNET_RPC_URL, TESTNET_NETWORK_PASSPHRASE } from "./constants";
 
 // --- Types ---
@@ -23,28 +21,6 @@ export interface SpecCustomType {
   kind: "struct" | "enum";
   fields?: { name: string; type: string }[];
   variants?: { name: string; values?: string[] }[];
-}
-
-// --- RPC Helper ---
-
-async function rpcRequest(method: string, params: Record<string, unknown>): Promise<any> {
-  const response = await fetch(TESTNET_RPC_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  const json = await response.json() as any;
-  if (json.error) {
-    throw new Error(`RPC error: ${json.error.message ?? JSON.stringify(json.error)}`);
-  }
-  return json.result;
-}
-
-async function getLedgerEntries(keys: xdr.LedgerKey[]): Promise<any[]> {
-  const result = await rpcRequest("getLedgerEntries", {
-    keys: keys.map((k) => k.toXDR("base64")),
-  });
-  return result?.entries ?? [];
 }
 
 // --- WASM Custom Section Extraction ---
@@ -180,22 +156,14 @@ function describeSpecType(t: any): string {
  * Returns function signatures, custom types, and documentation.
  */
 async function extractContractSpec(contractAddress: string): Promise<ContractSpec> {
-  // Step 1: Fetch contract instance to get WASM hash
-  const instanceKey = xdr.LedgerKey.contractData(
-    new xdr.LedgerKeyContractData({
-      contract: Address.fromString(contractAddress).toScAddress(),
-      key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent(),
-    }),
-  );
-
-  const instanceEntries = await getLedgerEntries([instanceKey]);
-  if (instanceEntries.length === 0) {
-    throw new Error(`Contract not found: ${contractAddress}`);
+  const server = new rpc.Server(TESTNET_RPC_URL);
+  let instance: xdr.ScContractInstance;
+  try {
+    instance = await server.getContractInstance(contractAddress);
+  } catch (error: any) {
+    if (error?.code === 404) throw new Error(`Contract not found: ${contractAddress}`);
+    throw error;
   }
-
-  const ledgerEntry = xdr.LedgerEntryData.fromXDR(instanceEntries[0].xdr, "base64");
-  const instance = ledgerEntry.contractData().val().instance();
   const executable = instance.executable();
   const execSwitch = executable.switch().name;
 
@@ -208,19 +176,7 @@ async function extractContractSpec(contractAddress: string): Promise<ContractSpe
     throw new Error(`Unsupported executable type: ${execSwitch}`);
   }
 
-  // Step 2: Fetch WASM bytes
-  const wasmHash = executable.wasmHash();
-  const codeKey = xdr.LedgerKey.contractCode(
-    new xdr.LedgerKeyContractCode({ hash: wasmHash }),
-  );
-
-  const codeEntries = await getLedgerEntries([codeKey]);
-  if (codeEntries.length === 0) {
-    throw new Error(`WASM code not found for contract: ${contractAddress}`);
-  }
-
-  const codeLedgerEntry = xdr.LedgerEntryData.fromXDR(codeEntries[0].xdr, "base64");
-  const wasmBytes = codeLedgerEntry.contractCode().code();
+  const wasmBytes = await server.getContractWasmByHash(executable.wasmHash());
 
   // Step 3: Extract contractspecv0 custom section
   const specSections = extractWasmCustomSections(wasmBytes, "contractspecv0");
@@ -423,17 +379,13 @@ export async function requestTokenDecimals(contractAddress: string): Promise<num
   try {
     const { contractAddress: addr } = validateSpecInput({ contractAddress });
     const server = new rpc.Server(TESTNET_RPC_URL);
-    const tx = new TransactionBuilder(new Account(Keypair.random().publicKey(), "0"), {
-      fee: "100",
-      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
-    })
-      .addOperation(new Contract(addr).call("decimals"))
-      .setTimeout(30)
-      .build();
-
-    const sim = await server.simulateTransaction(tx);
-    if ("error" in sim || !(sim as any).result?.retval) return null;
-    const value = Number(scValToNative((sim as any).result.retval));
+    const { result } = await server.queryContract<unknown>(
+      addr,
+      "decimals",
+      {},
+      TESTNET_NETWORK_PASSPHRASE,
+    );
+    const value = Number(result);
     // A token that reports nonsense is worse than one that reports nothing: silently scaling
     // by 10^NaN would reintroduce the exact bug this exists to prevent.
     return Number.isInteger(value) && value >= 0 && value <= 38 ? value : null;

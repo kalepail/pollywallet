@@ -28,6 +28,7 @@
 
 import {
   Keypair,
+  Account,
   TransactionBuilder,
   Networks,
   xdr,
@@ -37,6 +38,8 @@ import {
   Operation,
   hash,
   StrKey,
+  authorizeEntry,
+  buildAuthorizationEntryPreimage,
 } from "@stellar/stellar-sdk";
 import { Server, assembleTransaction } from "@stellar/stellar-sdk/rpc";
 import { ChannelsClient } from "@openzeppelin/relayer-plugin-channels";
@@ -133,12 +136,7 @@ function fail(testName, reason = "") {
 }
 
 function toI128(stroops) {
-  return xdr.ScVal.scvI128(
-    new xdr.Int128Parts({
-      lo: xdr.Uint64.fromString((stroops & 0xFFFFFFFFFFFFFFFFn).toString()),
-      hi: xdr.Int64.fromString((stroops >> 64n).toString()),
-    })
-  );
+  return nativeToScVal(stroops, { type: "i128" });
 }
 
 /**
@@ -156,13 +154,7 @@ async function fundViaFriendbot(publicKey) {
  * Poll for transaction confirmation given a hash.
  */
 async function pollTransaction(txHash) {
-  let getResult;
-  for (let i = 0; i < 60; i++) {
-    getResult = await server.getTransaction(txHash);
-    if (getResult.status !== "NOT_FOUND") break;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  return getResult;
+  return server.pollTransaction(txHash, { attempts: 60 });
 }
 
 /**
@@ -283,8 +275,6 @@ async function simulateInvoke(sourcePublicKey, hostFunc) {
  * @param {number[]} ruleIds - context_rule_ids for the AuthPayload
  */
 async function simulateSignAssembleSubmit(sourcePublicKey, hostFunc, authSigners, ruleIds) {
-  const networkId = hash(Buffer.from(NETWORK_PASSPHRASE));
-
   // ---- Pass 1: Get initial auth entries ----
   log("  Pass 1: Initial simulation...");
   const sourceAccount1 = await server.getAccount(sourcePublicKey);
@@ -379,32 +369,12 @@ async function simulateSignAssembleSubmit(sourcePublicKey, hostFunc, authSigners
       rootInvocation: delegatedInvocation,
     });
 
-    // Sign the Delegated signer's auth entry
-    const delegatedPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-      new xdr.HashIdPreimageSorobanAuthorization({
-        networkId,
-        nonce: delegatedNonce,
-        signatureExpirationLedger: expiration,
-        invocation: delegatedInvocation,
-      })
-    );
-    const delegatedSig = keypair.sign(hash(delegatedPreimage.toXDR()));
-    delegatedEntry.credentials().address().signature(
-      xdr.ScVal.scvVec([
-        xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("public_key"),
-            val: xdr.ScVal.scvBytes(keypair.rawPublicKey()),
-          }),
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("signature"),
-            val: xdr.ScVal.scvBytes(delegatedSig),
-          }),
-        ]),
-      ])
-    );
-
-    delegatedEntries.push(delegatedEntry);
+    delegatedEntries.push(await authorizeEntry(
+      delegatedEntry,
+      keypair,
+      expiration,
+      NETWORK_PASSPHRASE,
+    ));
   }
 
   // Combine all auth entries: wallet + delegated signers + any others
@@ -464,91 +434,15 @@ function logAuthEntries(entries) {
  * Sign auth entries for a standard Soroban address credential (keypair-based).
  * This handles the standard Soroban auth flow for a given keypair.
  */
-function signStandardAuthEntries(authEntries, keypair, expiration) {
-  const networkId = hash(Buffer.from(NETWORK_PASSPHRASE));
-
-  return authEntries.map((entry) => {
-    const credType = entry.credentials().switch().name;
-
-    if (credType === "sorobanCredentialsSourceAccount") {
-      // Convert to address credentials signed by the keypair
-      const nonce = xdr.Int64.fromString(Date.now().toString());
-
-      const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-        new xdr.HashIdPreimageSorobanAuthorization({
-          networkId,
-          nonce,
-          signatureExpirationLedger: expiration,
-          invocation: entry.rootInvocation(),
-        })
-      );
-      const sig = keypair.sign(hash(preimage.toXDR()));
-
-      const addressSignature = xdr.ScVal.scvVec([
-        xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("public_key"),
-            val: xdr.ScVal.scvBytes(keypair.rawPublicKey()),
-          }),
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("signature"),
-            val: xdr.ScVal.scvBytes(sig),
-          }),
-        ]),
-      ]);
-
-      return new xdr.SorobanAuthorizationEntry({
-        credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-          new xdr.SorobanAddressCredentials({
-            address: Address.fromString(keypair.publicKey()).toScAddress(),
-            nonce,
-            signatureExpirationLedger: expiration,
-            signature: addressSignature,
-          })
-        ),
-        rootInvocation: entry.rootInvocation(),
-      });
+async function signStandardAuthEntries(authEntries, keypair, expiration) {
+  for (const entry of authEntries) {
+    if (entry.credentials().switch().name === "sorobanCredentialsSourceAccount") {
+      throw new Error("Source-account authorization cannot be relayed");
     }
-
-    if (credType === "sorobanCredentialsAddress") {
-      const credentials = entry.credentials().address();
-      const credAddress = Address.fromScAddress(credentials.address()).toString();
-
-      // Only sign entries for this keypair's address
-      if (credAddress === keypair.publicKey()) {
-        credentials.signatureExpirationLedger(expiration);
-
-        const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-          new xdr.HashIdPreimageSorobanAuthorization({
-            networkId,
-            nonce: credentials.nonce(),
-            signatureExpirationLedger: expiration,
-            invocation: entry.rootInvocation(),
-          })
-        );
-        const sig = keypair.sign(hash(preimage.toXDR()));
-
-        credentials.signature(
-          xdr.ScVal.scvVec([
-            xdr.ScVal.scvMap([
-              new xdr.ScMapEntry({
-                key: xdr.ScVal.scvSymbol("public_key"),
-                val: xdr.ScVal.scvBytes(keypair.rawPublicKey()),
-              }),
-              new xdr.ScMapEntry({
-                key: xdr.ScVal.scvSymbol("signature"),
-                val: xdr.ScVal.scvBytes(sig),
-              }),
-            ]),
-          ])
-        );
-      }
-
-      return entry;
-    }
-
-    return entry;
-  });
+  }
+  return Promise.all(authEntries.map((entry) =>
+    authorizeEntry(entry, keypair, expiration, NETWORK_PASSPHRASE)
+  ));
 }
 
 /**
@@ -589,14 +483,7 @@ function delegatedSignerScVal(publicKey) {
  * Build the signature payload for a Soroban auth entry.
  */
 function buildSignaturePayload(entry, expiration) {
-  const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-    new xdr.HashIdPreimageSorobanAuthorization({
-      networkId: hash(Buffer.from(NETWORK_PASSPHRASE)),
-      nonce: entry.credentials().address().nonce(),
-      signatureExpirationLedger: expiration,
-      invocation: entry.rootInvocation(),
-    })
-  );
+  const preimage = buildAuthorizationEntryPreimage(entry, expiration, NETWORK_PASSPHRASE);
   return hash(preimage.toXDR());
 }
 
@@ -608,132 +495,6 @@ function buildAuthDigest(sigPayload, contextRuleIds) {
     contextRuleIds.map((id) => xdr.ScVal.scvU32(id))
   ).toXDR();
   return hash(Buffer.concat([sigPayload, ruleIdsXdr]));
-}
-
-/**
- * Sign the wallet's auth entry for a Delegated signer.
- *
- * The wallet's __check_auth flow:
- * 1. Receives AuthPayload { context_rule_ids, signers: Map<Signer, Bytes> }
- * 2. For Delegated signers: calls addr.require_auth_for_args((auth_digest,))
- * 3. The Soroban runtime needs a SEPARATE auth entry for the Delegated signer
- *
- * Since simulation doesn't run __check_auth (auth is mocked), it only
- * produces the wallet's auth entry. We must construct the Delegated signer's
- * auth entry manually as a sub-invocation within the wallet's rootInvocation.
- *
- * The Delegated signer's sub-invocation is:
- *   contractAddress: wallet_contract
- *   functionName: __check_auth
- *   args: (auth_digest,)
- *
- * We set this as a subInvocation on the wallet's rootInvocation, then
- * the signer's auth entry references this invocation tree.
- */
-function signWalletAuthEntries(authEntries, signerKeypair, ruleIds, expiration) {
-  const signedEntries = [];
-  const networkId = hash(Buffer.from(NETWORK_PASSPHRASE));
-
-  for (const entry of authEntries) {
-    const credType = entry.credentials().switch().name;
-
-    if (credType === "sorobanCredentialsAddress") {
-      const credentials = entry.credentials().address();
-      const credAddress = Address.fromScAddress(credentials.address()).toString();
-
-      if (credAddress === walletContractId) {
-        // This is the wallet's auth entry
-        credentials.signatureExpirationLedger(expiration);
-
-        // Compute the signature payload and auth digest for the AuthPayload
-        const sigPayload = buildSignaturePayload(entry, expiration);
-        const authDigest = buildAuthDigest(sigPayload, ruleIds);
-
-        // Build the Delegated signer's sub-invocation for require_auth_for_args
-        // The wallet's __check_auth calls:
-        //   addr.require_auth_for_args((auth_digest,).into_val(e))
-        // This creates a sub-invocation:
-        //   contract = wallet, fn = __check_auth, args = (auth_digest,)
-        const delegatedSubInvocation = new xdr.SorobanAuthorizedInvocation({
-          function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
-            new xdr.InvokeContractArgs({
-              contractAddress: Address.fromString(walletContractId).toScAddress(),
-              functionName: "__check_auth",
-              args: [
-                xdr.ScVal.scvBytes(authDigest),
-              ],
-            })
-          ),
-          subInvocations: [],
-        });
-
-        // Add the sub-invocation to the wallet's rootInvocation
-        const rootInvocation = entry.rootInvocation();
-        const existingSubs = rootInvocation.subInvocations();
-        rootInvocation.subInvocations([...existingSubs, delegatedSubInvocation]);
-
-        // Build the AuthPayload for the wallet
-        const authPayload = buildAuthPayload(ruleIds, [
-          {
-            signerScVal: delegatedSignerScVal(signerKeypair.publicKey()),
-            sigBytes: Buffer.alloc(0), // Empty for Delegated signers
-          },
-        ]);
-        credentials.signature(authPayload);
-        signedEntries.push(entry);
-
-        // Create a separate top-level auth entry for the Delegated signer
-        const delegatedNonce = xdr.Int64.fromString(Date.now().toString());
-
-        // The Delegated signer's auth entry: authorize the sub-invocation
-        const delegatedEntry = new xdr.SorobanAuthorizationEntry({
-          credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-            new xdr.SorobanAddressCredentials({
-              address: Address.fromString(signerKeypair.publicKey()).toScAddress(),
-              nonce: delegatedNonce,
-              signatureExpirationLedger: expiration,
-              signature: xdr.ScVal.scvVoid(), // placeholder
-            })
-          ),
-          rootInvocation: delegatedSubInvocation,
-        });
-
-        // Sign the Delegated signer's auth entry
-        const delegatedPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-          new xdr.HashIdPreimageSorobanAuthorization({
-            networkId,
-            nonce: delegatedNonce,
-            signatureExpirationLedger: expiration,
-            invocation: delegatedInvocation,
-          })
-        );
-        const delegatedSig = signerKeypair.sign(hash(delegatedPreimage.toXDR()));
-
-        delegatedEntry.credentials().address().signature(
-          xdr.ScVal.scvVec([
-            xdr.ScVal.scvMap([
-              new xdr.ScMapEntry({
-                key: xdr.ScVal.scvSymbol("public_key"),
-                val: xdr.ScVal.scvBytes(signerKeypair.rawPublicKey()),
-              }),
-              new xdr.ScMapEntry({
-                key: xdr.ScVal.scvSymbol("signature"),
-                val: xdr.ScVal.scvBytes(delegatedSig),
-              }),
-            ]),
-          ])
-        );
-
-        signedEntries.push(delegatedEntry);
-      } else {
-        signedEntries.push(entry);
-      }
-    } else {
-      signedEntries.push(entry);
-    }
-  }
-
-  return signedEntries;
 }
 
 // ---------------------------------------------------------------------------
@@ -843,8 +604,7 @@ async function phase2_fund() {
   );
 
   // Build and simulate to get auth entries
-  const sourceAccount = await server.getAccount(tempKeypair.publicKey());
-  const simTx = new TransactionBuilder(sourceAccount, {
+  const simTx = new TransactionBuilder(new Account(Keypair.random().publicKey(), "0"), {
     fee: BASE_FEE,
     networkPassphrase: NETWORK_PASSPHRASE,
   })
@@ -856,7 +616,7 @@ async function phase2_fund() {
   if ("error" in simResult) throw new Error(`Fund simulation failed: ${simResult.error}`);
 
   const expiration = simResult.latestLedger + LEDGERS_PER_HOUR;
-  const signedAuth = signStandardAuthEntries(
+  const signedAuth = await signStandardAuthEntries(
     simResult.result?.auth ?? [],
     tempKeypair,
     expiration

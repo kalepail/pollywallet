@@ -586,6 +586,21 @@ describe("argument type honesty", () => {
     expect(helpers).toContain("Option::<soroban_sdk::Val>::None");
   });
 
+  it("replays observed XDR for a user-defined ABI argument", () => {
+    const schema = withArgs([{
+      name: "op",
+      type: "ChannelOperation",
+      observedXdr: "AAAAEAAAAAEAAAACAAAADwAAAAdEZXBvc2l0AAAAAAMAAAAH",
+    }]);
+    expect(validateSchema(schema).valid).toBe(true);
+
+    const rust = generateTestCases(schema);
+    expect(rust).toContain("use soroban_sdk::xdr::FromXdr");
+    expect(rust).toContain("soroban_sdk::Val::from_xdr");
+    expect(rust).toContain("// op (observed ChannelOperation)");
+    expect(rust).not.toContain("unsupported positive-control argument type: ChannelOperation");
+  });
+
   it("emits a typed positive string and a different-string rejection", () => {
     const rust = generateTestCases(withArgs([
       { name: "memo", type: "string", constraint: { kind: "exact", value: "hello" } },

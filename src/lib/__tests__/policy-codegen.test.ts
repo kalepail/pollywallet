@@ -78,6 +78,8 @@ describe("buildSystemPrompt", () => {
     // The prompt names `unwrap_or(i128::MAX)` on purpose — as a prohibited anti-pattern.
     // What must never come back is the old instruction to actually do it.
     expect(prompt).toContain("Never substitute a permissive fallback");
+    expect(prompt).toContain("<()>::try_from_val(e, &install_params).is_ok()");
+    expect(prompt).toContain("Option::unwrap_or_else");
     expect(prompt).not.toMatch(/use maximum\/permissive defaults/);
     expect(prompt).not.toMatch(/so install succeeds even if a key is missing/);
   });
@@ -142,6 +144,33 @@ describe("buildUserPrompt", () => {
     const prompt = buildUserPrompt(schema);
     expect(prompt).toContain("threshold");
     expect(prompt).toContain("time_lock");
+  });
+
+  it("keeps analyzed XDR fixtures out of the model prompt", () => {
+    const schema: PolicySchema = {
+      $schema: SCHEMA_VERSION,
+      name: "custom-policy",
+      description: "A custom ABI policy",
+      contracts: [{
+        address: "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
+        functions: [{
+          name: "open_channel",
+          args: [{
+            name: "op",
+            type: "ChannelOperation",
+            observedValues: ["Deposit(7)"],
+            observedXdr: "AAAAEAAAAAEAAAACAAAADwAAAAdEZXBvc2l0AAAAAAMAAAAH",
+          }],
+        }],
+      }],
+      globalRules: [],
+    };
+
+    const prompt = buildUserPrompt(schema);
+    expect(prompt).toContain("op: ChannelOperation");
+    expect(prompt).not.toContain("observedXdr");
+    expect(prompt).not.toContain("Deposit(7)");
+    expect(prompt).not.toContain("AAAAEAAAAAEAAAAC");
   });
 });
 

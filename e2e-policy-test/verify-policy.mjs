@@ -24,18 +24,17 @@
 
 import {
   Keypair,
+  Account,
   TransactionBuilder,
   Networks,
   xdr,
   Address,
   nativeToScVal,
   scValToNative,
-  Contract,
   Operation,
-  hash,
-  BASE_FEE,
+  authorizeEntry,
 } from "@stellar/stellar-sdk";
-import { Server, assembleTransaction } from "@stellar/stellar-sdk/rpc";
+import { Server } from "@stellar/stellar-sdk/rpc";
 import { ChannelsClient } from "@openzeppelin/relayer-plugin-channels";
 import { readFileSync } from "fs";
 
@@ -223,8 +222,6 @@ function buildSigners() {
  * When expectSimFailure is true, a simulation error is treated as the expected outcome.
  */
 async function callContract(functionName, args, { expectSimFailure = false } = {}) {
-  const contract = new Contract(POLICY_CONTRACT_ID);
-
   // Build the host function
   const hostFunc = xdr.HostFunction.hostFunctionTypeInvokeContract(
     new xdr.InvokeContractArgs({
@@ -235,8 +232,7 @@ async function callContract(functionName, args, { expectSimFailure = false } = {
   );
 
   // Simulate to get auth entries
-  const account = await server.getAccount(publicKey);
-  const tx = new TransactionBuilder(account, {
+  const tx = new TransactionBuilder(new Account(Keypair.random().publicKey(), "0"), {
     fee: "100",
     networkPassphrase: NETWORK_PASSPHRASE,
   })
@@ -265,74 +261,21 @@ async function callContract(functionName, args, { expectSimFailure = false } = {
     return { hash: null, success: true, simulationError: null };
   }
 
-  // If no auth entries needed (read-only call), submit directly
+  // A call with no auth is read-only for this test suite; its simulated result is final.
   if ((simResult.result?.auth ?? []).length === 0) {
-    const assembled = assembleTransaction(tx, simResult).build();
-    assembled.sign(keypair);
-    const directResult = await server.sendTransaction(assembled);
-    if (directResult.status === "ERROR") throw new Error(`Send failed: ${JSON.stringify(directResult)}`);
-    let getResult;
-    for (let i = 0; i < 30; i++) {
-      getResult = await server.getTransaction(directResult.hash);
-      if (getResult.status !== "NOT_FOUND") break;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    if (getResult.status === "SUCCESS") {
-      let returnValue = null;
-      if (getResult.returnValue) { try { returnValue = scValToNative(getResult.returnValue); } catch {} }
-      return { hash: directResult.hash, success: true, result: getResult, returnValue };
-    }
-    throw new Error(`${functionName} failed: ${getResult.status}`);
+    const returnValue = simResult.result?.retval
+      ? scValToNative(simResult.result.retval)
+      : null;
+    return { hash: null, success: true, result: simResult, returnValue };
   }
 
   // Sign auth entries with the test keypair
   const LEDGERS_PER_HOUR = 720;
   const expiration = simResult.latestLedger + LEDGERS_PER_HOUR;
-  const networkId = hash(Buffer.from(NETWORK_PASSPHRASE));
   const authEntries = simResult.result?.auth ?? [];
-
-  const signedAuth = authEntries.map((entry) => {
-    const credType = entry.credentials().switch().name;
-    if (credType === "sorobanCredentialsSourceAccount") {
-      const nonce = xdr.Int64.fromString(Date.now().toString());
-      const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-        new xdr.HashIdPreimageSorobanAuthorization({
-          networkId, nonce, signatureExpirationLedger: expiration,
-          invocation: entry.rootInvocation(),
-        })
-      );
-      const sig = keypair.sign(hash(preimage.toXDR()));
-      return new xdr.SorobanAuthorizationEntry({
-        credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-          new xdr.SorobanAddressCredentials({
-            address: Address.fromString(publicKey).toScAddress(),
-            nonce, signatureExpirationLedger: expiration,
-            signature: xdr.ScVal.scvVec([xdr.ScVal.scvMap([
-              new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("public_key"), val: xdr.ScVal.scvBytes(keypair.rawPublicKey()) }),
-              new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("signature"), val: xdr.ScVal.scvBytes(sig) }),
-            ])]),
-          })
-        ),
-        rootInvocation: entry.rootInvocation(),
-      });
-    }
-    if (credType === "sorobanCredentialsAddress") {
-      const creds = entry.credentials().address();
-      creds.signatureExpirationLedger(expiration);
-      const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-        new xdr.HashIdPreimageSorobanAuthorization({
-          networkId, nonce: creds.nonce(), signatureExpirationLedger: expiration,
-          invocation: entry.rootInvocation(),
-        })
-      );
-      const sig = keypair.sign(hash(preimage.toXDR()));
-      creds.signature(xdr.ScVal.scvVec([xdr.ScVal.scvMap([
-        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("public_key"), val: xdr.ScVal.scvBytes(keypair.rawPublicKey()) }),
-        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("signature"), val: xdr.ScVal.scvBytes(sig) }),
-      ])]));
-    }
-    return entry;
-  });
+  const signedAuth = await Promise.all(authEntries.map((entry) =>
+    authorizeEntry(entry, keypair, expiration, NETWORK_PASSPHRASE)
+  ));
 
   // Submit via relayer
   let sendResult;
@@ -346,12 +289,7 @@ async function callContract(functionName, args, { expectSimFailure = false } = {
   }
 
   // Poll for confirmation
-  let getResult;
-  for (let i = 0; i < 30; i++) {
-    getResult = await server.getTransaction(sendResult.hash);
-    if (getResult.status !== "NOT_FOUND") break;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+  const getResult = await server.pollTransaction(sendResult.hash, { attempts: 30 });
 
   if (getResult.status === "SUCCESS") {
     let returnValue = null;

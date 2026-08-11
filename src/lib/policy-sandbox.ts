@@ -137,6 +137,8 @@ use soroban_sdk::testutils::Ledger as _;
 use soroban_sdk::auth::{Context, ContractContext};
 #[allow(unused_imports)]
 use soroban_sdk::{IntoVal, TryFromVal, FromVal};
+#[allow(unused_imports)]
+use soroban_sdk::xdr::FromXdr;
 
 /// Signers a call needs to satisfy every global rule in the schema. Positive tests and the
 /// positive controls in negative tests must use this rather than a hardcoded count, so a
@@ -1102,6 +1104,10 @@ function generateArgBuilderLines(
     if (/^vec<.+>$/.test(t)) return `${indent}args.push_back(soroban_sdk::Vec::<soroban_sdk::Val>::new(&env).into_val(&env)); // ${a.name}`;
     if (/^map<.+,.+>$/.test(t)) return `${indent}args.push_back(soroban_sdk::Map::<soroban_sdk::Val, soroban_sdk::Val>::new(&env).into_val(&env)); // ${a.name}`;
     if (/^option<.+>$/.test(t)) return `${indent}args.push_back(Option::<soroban_sdk::Val>::None.into_val(&env)); // ${a.name}`;
+    if (a.observedXdr) {
+      const bytes = [...Uint8Array.from(atob(a.observedXdr), c => c.charCodeAt(0))].join(", ");
+      return `${indent}args.push_back(soroban_sdk::Val::from_xdr(&env, &soroban_sdk::Bytes::from_array(&env, &[${bytes}])).unwrap()); // ${a.name} (observed ${rustStr(a.type)})`;
+    }
     return `${indent}compile_error!("unsupported positive-control argument type: ${rustStr(a.type)}");`;
   }).join("\n");
 }

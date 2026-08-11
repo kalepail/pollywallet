@@ -1,3 +1,5 @@
+import { StrKey } from "@stellar/stellar-sdk";
+
 // --- Policy Schema Types ---
 // Deterministic JSON schema that describes a policy contract.
 // Version: pollywallet-policy/v0
@@ -31,6 +33,8 @@ export interface ArgPermission {
   note?: string;
   /** Observed values from tx analysis (for pre-filling defaults) */
   observedValues?: string[];
+  /** One observed ScVal XDR fixture for ABI types the harness cannot construct itself. */
+  observedXdr?: string;
 }
 
 // --- Global Rule Types (unchanged) ---
@@ -131,13 +135,13 @@ export interface PolicySchema {
 export interface TxPattern {
   contractAddress: string;
   functionName: string;
-  args: { type: string; value: string }[];
+  args: { type: string; value: string; xdr?: string }[];
   signers: { type: "Delegated" | "External"; identity: string }[];
   /** If this is an execute() call, decomposed inner call details */
   innerCall?: {
     targetContract: string;
     functionName: string;
-    args: { type: string; value: string }[];
+    args: { type: string; value: string; xdr?: string }[];
   };
 }
 
@@ -281,9 +285,11 @@ export function validateSchema(schema: PolicySchema): ValidationResult {
               }
               if (!arg.type || typeof arg.type !== "string") {
                 errors.push(`${aPrefix}: type is required`);
-              } else if (!isHarnessRepresentableType(arg.type)) {
+              } else if (!isHarnessRepresentableType(arg.type) && !arg.observedXdr) {
                 errors.push(
-                  `${aPrefix}: type "${arg.type}" is not supported because the policy test harness cannot represent it`,
+                  `${aPrefix}: type "${arg.type}" needs an analyzed transaction fixture because ` +
+                  `the policy test harness cannot construct this user-defined ABI type. Re-analyze ` +
+                  `a transaction that calls this function.`,
                 );
               }
 
@@ -598,7 +604,7 @@ export function schemaFromPatterns(patterns: TxPattern[]): PolicySchema {
   }
 
   const contractMap = new Map<string, Map<string, {
-    args: Map<number, { type: string; values: string[] }>;
+    args: Map<number, { type: string; values: string[]; xdr?: string }>;
   }>>();
 
   for (const p of patterns) {
@@ -624,9 +630,15 @@ export function schemaFromPatterns(patterns: TxPattern[]): PolicySchema {
     const entry = funcMap.get(effectiveFunction)!;
     for (let i = 0; i < effectiveArgs.length; i++) {
       if (!entry.args.has(i)) {
-        entry.args.set(i, { type: effectiveArgs[i].type, values: [] });
+        entry.args.set(i, {
+          type: effectiveArgs[i].type,
+          values: [],
+          xdr: effectiveArgs[i].xdr,
+        });
       }
-      entry.args.get(i)!.values.push(effectiveArgs[i].value);
+      const arg = entry.args.get(i)!;
+      arg.values.push(effectiveArgs[i].value);
+      arg.xdr ??= effectiveArgs[i].xdr;
     }
   }
 
@@ -641,6 +653,7 @@ export function schemaFromPatterns(patterns: TxPattern[]): PolicySchema {
             name: `arg${[...entry.args.entries()].find(([, v]) => v === argData)?.[0] ?? 0}`,
             type: argData.type,
             observedValues: [...new Set(argData.values)],
+            observedXdr: argData.xdr,
           };
           return arg;
         });
@@ -696,6 +709,7 @@ export function mergeSpecIntoSchema(
               constraint: existingArg?.constraint,
               note: existingArg?.note,
               observedValues: existingArg?.observedValues,
+              observedXdr: existingArg?.observedXdr,
             };
           });
 
@@ -857,53 +871,12 @@ export function installParamsSpec(schema: PolicySchema): InstallParam[] {
  * generated Rust, where `Address::from_string` panics at runtime with an opaque
  * `Error(Value, InvalidInput)` — a schema problem disguised as a policy bug.
  *
- * Implemented locally rather than via `StrKey` from @stellar/stellar-sdk so this module stays
- * dependency-free: it is imported by the prompt builder, the test generator, and the browser
- * route alike.
  */
 export function isValidContractAddress(value: string): boolean {
-  return isValidStrKey(value, "C");
+  return StrKey.isValidContract(value);
 }
 
 /** True for either an account (`G...`) or contract (`C...`) address. */
 export function isValidAddress(value: string): boolean {
-  return isValidStrKey(value, "G") || isValidStrKey(value, "C");
-}
-
-const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-function isValidStrKey(value: string, prefix: string): boolean {
-  if (typeof value !== "string" || !value.startsWith(prefix) || value.length !== 56) return false;
-
-  // base32 decode
-  const bytes: number[] = [];
-  let bits = 0;
-  let acc = 0;
-  for (const ch of value) {
-    const idx = B32.indexOf(ch);
-    if (idx === -1) return false;
-    acc = (acc << 5) | idx;
-    bits += 5;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push((acc >> bits) & 0xff);
-    }
-  }
-  if (bytes.length !== 35) return false; // 1 version + 32 payload + 2 checksum
-
-  const payload = bytes.slice(0, 33);
-  const checksum = bytes[33] | (bytes[34] << 8);
-  return crc16xmodem(payload) === checksum;
-}
-
-/** CRC16-XModem, the checksum StrKey uses. */
-function crc16xmodem(bytes: number[]): number {
-  let crc = 0x0000;
-  for (const byte of bytes) {
-    crc ^= byte << 8;
-    for (let i = 0; i < 8; i++) {
-      crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
-    }
-  }
-  return crc & 0xffff;
+  return StrKey.isValidEd25519PublicKey(value) || StrKey.isValidContract(value);
 }
